@@ -1,0 +1,8 @@
+{
+  "name": "BitchManager — Block System Hardware & Action Engine",
+  "description": "Web companion, lighting studio, and MIDI/Macro router for the BitchBoy V1 69-control hardware console with live 2D reactive key FX, 15 light shows, custom sequencer, and 8-slot memory banks.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
