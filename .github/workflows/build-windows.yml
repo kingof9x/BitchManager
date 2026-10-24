@@ -35,7 +35,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
 
       - name: Install dependencies
         run: npm install
@@ -43,11 +42,63 @@ jobs:
       - name: Build Web Application (Vite)
         run: npm run build
 
+      - name: Ensure Electron Entry File Exists
+        shell: bash
+        run: |
+          mkdir -p electron
+          if [ ! -f electron/main.cjs ]; then
+            cat << 'EOF' > electron/main.cjs
+const { app, BrowserWindow, Menu } = require('electron');
+const path = require('path');
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1600,
+    height: 860,
+    minWidth: 1024,
+    minHeight: 680,
+    title: 'BitchManager — Video Controller & LED Programming Studio',
+    backgroundColor: '#040807',
+    autoHideMenuBar: true,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  Menu.setApplicationMenu(null);
+  win.loadFile(path.join(__dirname, '../dist/index.html'));
+
+  win.once('ready-to-show', () => {
+    win.show();
+  });
+}
+
+app.whenReady().then(() => {
+  createWindow();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+EOF
+          fi
+
       - name: Install Electron & Electron-Builder
         run: npm install --no-save electron@^33.2.1 electron-builder@^25.1.8
 
       - name: Package Windows .exe
-        run: npx electron-builder --win nsis portable --x64 -c.directories.output=dist_electron -c.directories.app=.
+        run: npx electron-builder --win nsis portable --x64 -c.directories.output=dist_electron -c.directories.app=. -c.extraMetadata.main=electron/main.cjs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
