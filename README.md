@@ -23,3 +23,5 @@
   - Built-in virtual MIDI source (`BitchBoy Virtual Out`), multi-DAW routing, channel remapping, semitone transpose, and velocity curves.
 - **Macro Action Engine**:
   - Trigger multi-step QWERTY keystroke sequences, OSC packets, or AppleScript automations from any hardware key.
+
+  Message me on discord for any questions or suggestions!!! @Kooklys
