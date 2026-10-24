@@ -1,5 +1,4 @@
 import { MIDIOutputTarget, MIDIVelocityCurve } from './types';
-import { audio } from './audio';
 
 export interface WebMidiPort {
   id: string;
@@ -22,7 +21,7 @@ export interface WebMidiAccess {
   onstatechange: (() => void) | null;
 }
 
-// Web MIDI Manager supporting real hardware controllers and software MIDI loops
+// Web MIDI Manager for Video Control Surfaces & Hardware LED Feedback
 export class MIDIManager {
   private midiAccess: WebMidiAccess | null = null;
   private isAvailable: boolean = false;
@@ -82,20 +81,20 @@ export class MIDIManager {
   public getAvailableOutputs(): MIDIOutputTarget[] {
     const targets: MIDIOutputTarget[] = [
       {
-        id: 'virtual_synth',
-        name: 'BitchBoy Internal Web Synth',
+        id: 'video_router',
+        name: 'Video App Loopback (Resolume / OBS / TouchDesigner)',
         isHardwareBitchBoy: false,
       },
       {
         id: 'virtual_loop',
-        name: 'BitchBoy Virtual Web Out',
+        name: 'BitchBoy Virtual MIDI Out',
         isHardwareBitchBoy: false,
       },
     ];
 
     if (this.midiAccess) {
       this.midiAccess.outputs.forEach((output: WebMidiOutput) => {
-        const name = output.name || `MIDI Output (${output.id})`;
+        const name = output.name || `MIDI Device (${output.id})`;
         const isBB = name.toLowerCase().includes('bitch') || name.toLowerCase().includes('pico') || name.toLowerCase().includes('rp2040');
         targets.push({
           id: output.id,
@@ -137,13 +136,6 @@ export class MIDIManager {
 
     const bytes = [outStatus, outData1, outData2];
 
-    // Always play with internal synthesizer if virtual synth is enabled
-    if (selectedTargets.has('virtual_synth') && isNote) {
-      if (msgType === 0x90 && outData2 > 0) {
-        audio.playMIDINote(outData1, outData2, 0.25);
-      }
-    }
-
     // Send to Web MIDI destinations
     if (this.midiAccess && virtualOutEnabled) {
       this.midiAccess.outputs.forEach((output: WebMidiOutput) => {
@@ -163,7 +155,7 @@ export class MIDIManager {
     if (isCC) {
       desc = `CH${chDisplay} CC#${outData1} = ${outData2}`;
     } else if (msgType === 0x90 && outData2 > 0) {
-      desc = `CH${chDisplay} NOTE ON #${outData1} V:${outData2}`;
+      desc = `CH${chDisplay} NOTE ON #${outData1} VEL:${outData2}`;
     } else {
       desc = `CH${chDisplay} NOTE OFF #${outData1}`;
     }

@@ -170,13 +170,13 @@ export const LeftWing: React.FC<{
                 onClick={onSendTestChord}
                 className="py-1 px-2 rounded bg-teal-900/40 hover:bg-teal-800/60 border border-teal-500/40 text-teal-300 font-mono text-[8px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
               >
-                <Music className="w-2.5 h-2.5" /> TEST C-CHORD
+                <Layers className="w-2.5 h-2.5" /> TEST VIDEO CUE
               </button>
               <button
                 onClick={onSendPanicAllNotesOff}
                 className="py-1 px-2 rounded bg-rose-950/40 hover:bg-rose-900/60 border border-rose-500/40 text-rose-300 font-mono text-[8px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
               >
-                <AlertTriangle className="w-2.5 h-2.5" /> ALL NOTES OFF
+                <AlertTriangle className="w-2.5 h-2.5" /> ALL CUES OFF
               </button>
             </div>
 

@@ -4,7 +4,6 @@ import {
   PresetSlot,
   ChassisTheme,
   LEDPaletteMode,
-  SoundPack,
   LEDFXMode,
   MIDIVelocityCurve,
   MIDIOutputTarget,
@@ -17,8 +16,8 @@ import {
   buildDefault8MemorySlots,
   buildStarterCustomEffects,
 } from './types';
-import { audio } from './audio';
 import { midiManager } from './webmidi';
+import bitchboyLogo from './assets/bitchboy.png';
 import { ScrewRivet, GlowingWordLogo, OfficialMascot } from './components/MascotAndLogo';
 import {
   HardwareKeyCap,
@@ -32,7 +31,6 @@ import { CenterHUD } from './components/CenterHUD';
 import {
   Sliders,
   Sparkles,
-  Volume2,
   Lock,
   Unlock,
   Folder,
@@ -41,6 +39,7 @@ import {
   ZoomIn,
   ZoomOut,
   StopCircle,
+  Video,
 } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -62,15 +61,14 @@ export const App: React.FC = () => {
   });
   const [activeSlot, setActiveSlot] = useState<number>(0);
   const [isLocked, setIsLocked] = useState<boolean>(false);
-  const [lastStreamMessage, setLastStreamMessage] = useState<string>('IDLE // READY');
+  const [lastStreamMessage, setLastStreamMessage] = useState<string>('IDLE // VIDEO READY');
   const [userNotes, setUserNotes] = useState<string>(
-    'Show notes: Slot A configured for live Ableton clip triggers.'
+    'Video App Profile: Resolume Arena clip triggers & layer opacity faders configured. LED feedback programmed for active video cues.'
   );
 
   // --- CUSTOMIZATION & THEMES ---
   const [currentTheme, setCurrentTheme] = useState<ChassisTheme>('PETROL TEAL');
   const [ledPalette, setLedPalette] = useState<LEDPaletteMode>('VELOCITY MULTI-COLOR');
-  const [soundPack, setSoundPack] = useState<SoundPack>('8-BIT ARCADE');
   const [currentFXMode, setCurrentFXMode] = useState<LEDFXMode>('STATIC (PRESET)');
   const [fxSpeed, setFxSpeed] = useState<number>(1.0);
   const [isRainbowRunning, setIsRainbowRunning] = useState<boolean>(false);
@@ -85,7 +83,7 @@ export const App: React.FC = () => {
   const [velocityCurve, setVelocityCurve] = useState<MIDIVelocityCurve>('LINEAR');
   const [outputTargets, setOutputTargets] = useState<MIDIOutputTarget[]>([]);
   const [selectedTargets, setSelectedTargets] = useState<Set<string>>(
-    new Set(['virtual_synth', 'BitchBoy Virtual Web Out'])
+    new Set(['video_router', 'BitchBoy Virtual MIDI Out'])
   );
   const [packetHistory, setPacketHistory] = useState<string[]>([]);
   const [tapTempoBPM, setTapTempoBPM] = useState<number>(120);
@@ -130,11 +128,6 @@ export const App: React.FC = () => {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const theme = THEME_CONFIGS[currentTheme];
-
-  // Sync sound pack with audio engine
-  useEffect(() => {
-    audio.setSoundPack(soundPack);
-  }, [soundPack]);
 
   // Save presets to localStorage
   const saveCurrentSlot = useCallback(() => {
@@ -192,7 +185,7 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, [autoFit]);
 
-  // Route incoming MIDI
+  // Route incoming MIDI to video destinations
   const routeMIDIPacket = (status: number, data1: number, data2: number) => {
     if (!midiThruEnabled) return;
     const packetStr = midiManager.sendMIDIToOutputs(
@@ -254,7 +247,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Trigger Key Press Simulation
+  // Trigger Key Press Simulation & LED response
   const triggerKeyPress = (index: number, isShiftDown: boolean = false) => {
     if (paintOnMainChassis && index < 49) {
       paintKey(index, customBrushVelocity);
@@ -278,10 +271,9 @@ export const App: React.FC = () => {
     const item = controls[index];
     if (!item) return;
 
-    audio.playKeyTap(item.number, item.activeVelocity);
-    setLastStreamMessage(`[${item.label}] PRESS #${item.number} V:${item.activeVelocity}`);
+    setLastStreamMessage(`[${item.label}] PRESS #${item.number} VEL:${item.activeVelocity}`);
 
-    // Update LED state based on feedback mode
+    // Update LED state based on programmed feedback mode
     let nextLED = item.activeVelocity;
     let nextToggle = item.toggleLatched;
 
@@ -303,10 +295,10 @@ export const App: React.FC = () => {
       return next;
     });
 
-    // Send MIDI out
+    // Send MIDI packet out to video application
     routeMIDIPacket(0x90, item.number, item.activeVelocity);
 
-    // Trigger reactive spatial FX on 49 keys
+    // Trigger reactive spatial FX on 49 LEDs
     if (index < 49 && reactiveKeyFXMode !== 'OFF') {
       triggerReactivePulse(index);
     }
@@ -331,7 +323,7 @@ export const App: React.FC = () => {
     }, 120);
   };
 
-  // Trigger 2D Spatial Reactive Pulse
+  // Trigger 2D Spatial Reactive Pulse across 49 LEDs
   const triggerReactivePulse = (keyIndex: number) => {
     const pos = BitchBoyKeyMap.keyPositions[keyIndex];
     if (!pos) return;
@@ -358,7 +350,7 @@ export const App: React.FC = () => {
     setActivePulses((prev) => [...prev.slice(-10), newPulse]);
   };
 
-  // 2D Reactive Key FX Animation Loop
+  // 2D Reactive Key LED Animation Loop
   useEffect(() => {
     if (activePulses.length === 0) return;
 
@@ -387,7 +379,7 @@ export const App: React.FC = () => {
           return [];
         }
 
-        // Apply spatial math to 49 keys
+        // Apply spatial LED math to 49 keys
         setControls((cPrev) => {
           const next = [...cPrev];
           const palette = [5, 14, 24, 38, 52, 68, 84, 98, 112, 127];
@@ -492,7 +484,7 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [activePulses, reactiveSpeed, reactiveRainbow, reactiveColorVelocity]);
 
-  // Physical Computer Keyboard Typing Listener
+  // Physical Computer Keyboard Typing Listener (triggers reactive LED FX on console)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't intercept typing when in text input
@@ -503,7 +495,6 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Map common typing keys to random or specific 49 keys
       const charCode = e.key.charCodeAt(0) || 0;
       const keyIdx = Math.abs(charCode * 7 + 13) % 49;
       triggerKeyPress(keyIdx, e.shiftKey);
@@ -528,7 +519,6 @@ export const App: React.FC = () => {
       next[keyIndex].currentLED = newV;
       return next;
     });
-    audio.playKeyTap(controls[keyIndex]?.number, newV);
   };
 
   // Continuous Custom Light Show Player
@@ -775,7 +765,6 @@ export const App: React.FC = () => {
   const runRainbowWaveRefresh = () => {
     if (isRainbowRunning) return;
     setIsRainbowRunning(true);
-    audio.playPresetSwitch();
 
     const rainbowVelocities = [5, 14, 24, 38, 52, 68, 84, 98, 112, 122, 127];
     let step = 0;
@@ -837,7 +826,6 @@ export const App: React.FC = () => {
         setFxSpeed(Math.min(2.5, Math.max(0.4, Math.round((bpm / 120) * 10) / 10)));
       }
     }
-    audio.playKnobTick();
   };
 
   const selectedControl = controls[selectedIndex] || controls[0];
@@ -852,15 +840,16 @@ export const App: React.FC = () => {
           onMouseLeave={() => setIsHoveringTitleLogo(false)}
           className="flex items-center gap-3 cursor-pointer"
         >
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center font-mono font-black text-sm bg-gradient-to-br from-teal-400 to-emerald-600 text-black shadow-md transition-transform"
+          <img
+            src={bitchboyLogo}
+            alt="BitchBoy Mascot"
+            className="w-9 h-9 object-contain rounded-md shadow-md transition-transform"
             style={{
+              imageRendering: 'pixelated',
               boxShadow: isHoveringTitleLogo ? `0 0 16px ${theme.accentPrimary}` : 'none',
-              transform: isHoveringTitleLogo ? 'scale(1.08)' : 'scale(1)',
+              transform: isHoveringTitleLogo ? 'scale(1.12)' : 'scale(1)',
             }}
-          >
-            BB
-          </div>
+          />
 
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
@@ -884,17 +873,17 @@ export const App: React.FC = () => {
               className="font-mono text-[7.5px] font-semibold tracking-wider -mt-0.5"
               style={{ color: theme.headerText }}
             >
-              BLOCK SYSTEM HARDWARE // LED & ACTION ENGINE
+              BLOCK SYSTEM HARDWARE // VIDEO CONTROL & LED ENGINE
             </span>
           </div>
         </div>
 
-        {/* Online / Ready Status Pill */}
+        {/* Video / MIDI Status Pill */}
         <div className="flex items-center gap-2 bg-black/60 px-3 py-1 rounded-full border border-emerald-500/40">
           <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           <div className="flex flex-col">
             <span className="font-mono text-[8px] font-black text-emerald-400 leading-tight">
-              {isConnected ? 'ONLINE // HARDWARE CONNECTED' : 'ONLINE // ENGINE READY'}
+              {isConnected ? 'ONLINE // HARDWARE CONNECTED' : 'ONLINE // VIDEO ENGINE READY'}
             </span>
             <span className="font-mono text-[7px] text-zinc-400 leading-tight">
               {deviceName}
@@ -953,7 +942,7 @@ export const App: React.FC = () => {
             </button>
           </div>
 
-          {/* Memory Slot Dropdown */}
+          {/* Video Memory Slot Dropdown */}
           <select
             value={activeSlot}
             onChange={(e) => {
@@ -962,7 +951,6 @@ export const App: React.FC = () => {
               setActiveSlot(idx);
               setControls(slots[idx].controls);
               setUserNotes(slots[idx].globalRules);
-              audio.playPresetSwitch();
               runRainbowWaveRefresh();
             }}
             className="bg-black/60 border border-white/20 text-teal-300 rounded-lg px-2 py-1 font-mono text-[8px] font-bold cursor-pointer"
@@ -974,12 +962,11 @@ export const App: React.FC = () => {
             ))}
           </select>
 
-          {/* Theme Selector */}
+          {/* Chassis Theme Selector */}
           <select
             value={currentTheme}
             onChange={(e) => {
               setCurrentTheme(e.target.value as ChassisTheme);
-              audio.playPresetSwitch();
             }}
             className="bg-black/60 border border-white/20 text-teal-300 rounded-lg px-2 py-1 font-mono text-[8px] font-bold cursor-pointer"
           >
@@ -990,19 +977,21 @@ export const App: React.FC = () => {
             <option value="STEALTH NOIR">🎨 Stealth Noir</option>
           </select>
 
-          {/* Sound Pack Selector */}
+          {/* LED Response Palette Selector */}
           <select
-            value={soundPack}
+            value={ledPalette}
             onChange={(e) => {
-              setSoundPack(e.target.value as SoundPack);
-              audio.playPresetSwitch();
+              setLedPalette(e.target.value as LEDPaletteMode);
             }}
-            className="bg-black/60 border border-white/20 text-zinc-200 rounded-lg px-2 py-1 font-mono text-[8px] font-bold cursor-pointer"
+            className="bg-black/60 border border-white/20 text-amber-300 rounded-lg px-2 py-1 font-mono text-[8px] font-bold cursor-pointer"
+            title="LED Color Response Palette"
           >
-            <option value="8-BIT ARCADE">🔊 8-Bit Arcade</option>
-            <option value="CHERRY MX BLUE">🔊 Cherry MX Blue</option>
-            <option value="SCI-FI SYNTH">🔊 Sci-Fi Synth</option>
-            <option value="MUTE SOUNDS">🔇 Mute Sounds</option>
+            <option value="VELOCITY MULTI-COLOR">💡 Velocity Multi-Color</option>
+            <option value="CYBER CYAN">💡 Cyber Cyan</option>
+            <option value="MATRIX GREEN">💡 Matrix Green</option>
+            <option value="SOLAR AMBER">💡 Solar Amber</option>
+            <option value="SYNTH MAGENTA">💡 Synth Magenta</option>
+            <option value="ARCTIC WHITE">💡 Arctic White</option>
           </select>
 
           {/* Rainbow Refresh Button */}
@@ -1112,7 +1101,7 @@ export const App: React.FC = () => {
 
             {/* THREE SYMMETRIC PANELS: LEFT WING + CENTER CONSOLE + RIGHT WING */}
             <div className="flex items-start justify-between gap-5 h-full">
-              {/* LEFT WING: MIDI Router, 20-CC Scope & Telemetry, Memory Bank */}
+              {/* LEFT WING: Video MIDI Router, 20-CC Scope & Telemetry, Memory Bank */}
               <LeftWing
                 controls={controls}
                 slots={slots}
@@ -1122,12 +1111,10 @@ export const App: React.FC = () => {
                   setActiveSlot(idx);
                   setControls(slots[idx].controls);
                   setUserNotes(slots[idx].globalRules);
-                  audio.playPresetSwitch();
                   runRainbowWaveRefresh();
                 }}
                 onSaveSlot={() => {
                   saveCurrentSlot();
-                  audio.playPresetSwitch();
                   setLastStreamMessage('💾 PRESETS SAVED TO LOCAL STORAGE');
                 }}
                 onCloneSlot={() => {
@@ -1140,7 +1127,6 @@ export const App: React.FC = () => {
                   };
                   setSlots(copy);
                   localStorage.setItem('BitchBoy_SavedSlots_v5', JSON.stringify(copy));
-                  audio.playPresetSwitch();
                 }}
                 onResetSlot={() => {
                   const defaults = buildDefault8MemorySlots();
@@ -1149,7 +1135,6 @@ export const App: React.FC = () => {
                   setSlots(copy);
                   setControls(defaults[activeSlot].controls);
                   localStorage.setItem('BitchBoy_SavedSlots_v5', JSON.stringify(copy));
-                  audio.playPresetSwitch();
                 }}
                 onExportSlot={() => {
                   const jsonStr = JSON.stringify(slots[activeSlot], null, 2);
@@ -1201,11 +1186,11 @@ export const App: React.FC = () => {
                 tapTempoBPM={tapTempoBPM}
                 onRegisterTapTempo={handleTapTempo}
                 onSendTestChord={() => {
+                  // Pulse note triggers to test video cue mapping
                   [60, 64, 67, 72].forEach((note) => {
                     routeMIDIPacket(0x90, note, 110);
                     setTimeout(() => routeMIDIPacket(0x80, note, 0), 350);
                   });
-                  audio.playPresetSwitch();
                 }}
                 onSendPanicAllNotesOff={() => {
                   for (let ch = 0; ch < 16; ch++) {
@@ -1287,7 +1272,7 @@ export const App: React.FC = () => {
                   >
                     <div className="flex items-center justify-between font-mono text-[8px] font-bold text-zinc-400">
                       <span>8 VERTICAL FADERS (CC 0..7)</span>
-                      <span className="text-[7px] text-zinc-500">ANALOG VALUE 0..127</span>
+                      <span className="text-[7px] text-zinc-500">OPACITY & PARAMETERS 0..127</span>
                     </div>
 
                     <div className="grid grid-cols-8 gap-1 items-center justify-items-center">
@@ -1306,7 +1291,6 @@ export const App: React.FC = () => {
                                 return next;
                               });
                               routeMIDIPacket(0xb0, item.number, val);
-                              audio.playFaderSlide();
                             }}
                           />
                         );
@@ -1314,22 +1298,22 @@ export const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* In-Chassis Drawer: User Notes & Rules */}
+                  {/* In-Chassis Drawer: Video Mapping Rules */}
                   <div className="bg-black/50 p-2 rounded-xl border border-white/10 flex flex-col gap-1">
                     <span className="font-mono text-[7.5px] font-bold text-zinc-400 uppercase">
-                      In-Chassis Notes & Rules
+                      Video Mapping Rules & LED Logic
                     </span>
                     <textarea
                       value={userNotes}
                       onChange={(e) => setUserNotes(e.target.value)}
-                      placeholder="Show rules: Slot configured for live set..."
+                      placeholder="Video cue triggers, layer opacity faders, and LED response logic..."
                       rows={2}
                       className="w-full bg-zinc-950/70 border border-white/10 rounded p-1.5 font-mono text-[7.5px] text-zinc-300 resize-none focus:outline-none focus:border-teal-400"
                     />
                   </div>
                 </div>
 
-                {/* Middle Section: 4 Horizontal Faders + Wordmark + Inspector HUD */}
+                {/* Middle Section: 4 Horizontal Crossfaders + Wordmark + Inspector HUD */}
                 <div className="flex flex-col gap-2.5 w-[254px]">
                   {/* 4 Horizontal Crossfaders (CC 8..11) */}
                   <div
@@ -1340,8 +1324,8 @@ export const App: React.FC = () => {
                     }}
                   >
                     <div className="flex items-center justify-between font-mono text-[8px] font-bold text-zinc-400">
-                      <span>4 HORIZONTAL CROSSFADERS</span>
-                      <span className="text-[7px] text-zinc-500">CC 8..11</span>
+                      <span>4 VIDEO CROSSFADERS</span>
+                      <span className="text-[7px] text-zinc-500">CC 8..11 (A/B BUS)</span>
                     </div>
 
                     <div className="flex flex-col gap-1">
@@ -1360,7 +1344,6 @@ export const App: React.FC = () => {
                                 return next;
                               });
                               routeMIDIPacket(0xb0, item.number, val);
-                              audio.playFaderSlide();
                             }}
                           />
                         );
@@ -1371,14 +1354,13 @@ export const App: React.FC = () => {
                   {/* Glowing BiTCHBOY Logo */}
                   <GlowingWordLogo auraColor={theme.accentPrimary} />
 
-                  {/* Center Inspector HUD */}
+                  {/* Center Inspector HUD: Program LED Response */}
                   <CenterHUD
                     selectedControl={selectedControl}
                     selectedIndices={selectedIndices}
                     onUpdateControl={(updates) => {
                       setControls((prev) => {
                         const next = [...prev];
-                        // Apply to all multi-selected items if applicable
                         selectedIndices.forEach((idx) => {
                           next[idx] = { ...next[idx], ...updates };
                         });
@@ -1396,7 +1378,6 @@ export const App: React.FC = () => {
                         });
                         return next;
                       });
-                      audio.playKeyTap();
                     }}
                     paletteMode={ledPalette}
                     themeAccent={theme.accentPrimary}
@@ -1414,8 +1395,8 @@ export const App: React.FC = () => {
                     }}
                   >
                     <div className="flex items-center justify-between font-mono text-[8px] font-bold text-zinc-400">
-                      <span>8 ROTARY KNOBS</span>
-                      <span className="text-[7px] text-zinc-500">CC 20..27</span>
+                      <span>8 ROTARY ENCODERS</span>
+                      <span className="text-[7px] text-zinc-500">EFFECT PARAMETERS (CC 20..27)</span>
                     </div>
 
                     <div className="grid grid-cols-4 gap-1.5 justify-items-center">
@@ -1434,7 +1415,6 @@ export const App: React.FC = () => {
                                 return next;
                               });
                               routeMIDIPacket(0xb0, item.number, val);
-                              audio.playKnobTick();
                             }}
                           />
                         );
@@ -1455,7 +1435,7 @@ export const App: React.FC = () => {
                   >
                     <div className="flex items-center justify-between font-mono text-[8px] font-bold text-zinc-400">
                       <span>3×3 KEYPAD (9 KEYS)</span>
-                      <span className="text-[7px] text-zinc-500">NOTES 36..46</span>
+                      <span className="text-[7px] text-zinc-500">MASTER CUES (NOTES 36..46)</span>
                     </div>
 
                     <div className="grid grid-cols-3 gap-1.5 justify-items-center">
@@ -1501,7 +1481,6 @@ export const App: React.FC = () => {
                   ];
                   setEditingCustomFX({ ...editingCustomFX, frames: newFrames });
                   setEditingFrameIndex(newFrames.length - 1);
-                  audio.playKnobTick();
                 }}
                 onDuplicateFrame={() => {
                   const current = editingCustomFX.frames[editingFrameIndex] || Array(49).fill(0);
@@ -1509,7 +1488,6 @@ export const App: React.FC = () => {
                   newFrames.splice(editingFrameIndex + 1, 0, [...current]);
                   setEditingCustomFX({ ...editingCustomFX, frames: newFrames });
                   setEditingFrameIndex(editingFrameIndex + 1);
-                  audio.playKnobTick();
                 }}
                 onDeleteFrame={() => {
                   if (editingCustomFX.frames.length <= 1) return;
@@ -1547,7 +1525,6 @@ export const App: React.FC = () => {
                     for (let k = 0; k < 49; k++) next[k].currentLED = shifted[k];
                     return next;
                   });
-                  audio.playKnobTick();
                 }}
                 onInvertFrame={() => {
                   const current = editingCustomFX.frames[editingFrameIndex] || Array(49).fill(0);
@@ -1613,7 +1590,6 @@ export const App: React.FC = () => {
                   setEditingCustomFX(fx);
                   setIsPlayingCustomFX(true);
                   setActiveCustomFXName(fx.name);
-                  audio.playPresetSwitch();
                 }}
                 onStopCustomFX={() => {
                   setIsPlayingCustomFX(false);
@@ -1658,12 +1634,10 @@ export const App: React.FC = () => {
                     frames: baked,
                   });
                   setEditingFrameIndex(0);
-                  audio.playPresetSwitch();
                 }}
                 onSelectEffectForEditing={(fx) => {
                   setEditingCustomFX(fx);
                   setEditingFrameIndex(0);
-                  audio.playKnobTick();
                 }}
                 onExportFXToClipboard={() => {
                   navigator.clipboard.writeText(JSON.stringify(editingCustomFX, null, 2));
@@ -1696,7 +1670,6 @@ export const App: React.FC = () => {
                 onTriggerDemoReactiveFX={() => {
                   const randomKey = [11, 12, 19, 20, 18, 21, 44][Math.floor(Math.random() * 7)];
                   triggerReactivePulse(randomKey);
-                  audio.playKeyTap();
                 }}
                 paletteMode={ledPalette}
                 themeAccent={theme.accentPrimary}
@@ -1713,13 +1686,13 @@ export const App: React.FC = () => {
           <span className="text-zinc-600">|</span>
           <span>Theme: {currentTheme}</span>
           <span className="text-zinc-600">|</span>
-          <span>Sound: {soundPack}</span>
+          <span>LED Palette: {ledPalette}</span>
         </div>
 
         <div className="flex items-center gap-3">
-          <span>Active Slot: {slots[activeSlot]?.name}</span>
+          <span>Active Video Profile: {slots[activeSlot]?.name}</span>
           <span className="text-zinc-600">|</span>
-          <span>BitchBoy V1 69-Control Hardware Matrix</span>
+          <span>BitchBoy V1 Video Control & LED Surface</span>
         </div>
       </footer>
     </div>

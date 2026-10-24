@@ -21,8 +21,6 @@ export type LEDFXMode =
   | 'EQ DANCE'
   | 'COLOR RUNNER';
 
-export type SoundPack = '8-BIT ARCADE' | 'CHERRY MX BLUE' | 'SCI-FI SYNTH' | 'MUTE SOUNDS';
-
 export type ChassisTheme =
   | 'PETROL TEAL'
   | 'RETRO MATRIX'
@@ -405,66 +403,66 @@ export function buildDefault8MemorySlots(): PresetSlot[] {
   return [
     {
       id: 'slot_a',
-      name: 'SLOT A // PERFORMANCE',
+      name: 'SLOT A // RESOLUME ARENA',
       controls: buildDefault69Map(),
-      globalRules: 'Slot A configured for live clip launch and filters.',
-      iconName: 'mic',
+      globalRules: 'Resolume Arena VJ clip triggers, column launches, and layer opacity faders.',
+      iconName: 'tv',
       accentVelocity: 68,
     },
     {
       id: 'slot_b',
-      name: 'SLOT B // DAW PRODUCTION',
+      name: 'SLOT B // OBS STUDIO',
       controls: buildDefault69Map(),
-      globalRules: 'Slot B mapped to Ableton Live track automation.',
-      iconName: 'sliders',
+      globalRules: 'OBS Studio scene transitions, lower-thirds toggles, and live stream camera feeds.',
+      iconName: 'video',
       accentVelocity: 52,
     },
     {
       id: 'slot_c',
-      name: 'SLOT C // VISUALS & DMX',
+      name: 'SLOT C // TOUCHDESIGNER',
       controls: buildDefault69Map(),
-      globalRules: 'Slot C sending ArtNet/DMX cues via OSC router.',
+      globalRules: 'TouchDesigner real-time generative visual parameters and geometry transforms.',
       iconName: 'sparkles',
       accentVelocity: 112,
     },
     {
       id: 'slot_d',
-      name: 'SLOT D // STREAM DECK',
+      name: 'SLOT D // VMIX SWITCHER',
       controls: buildDefault69Map(),
-      globalRules: 'Slot D hotkeys for OBS scene switching and audio muting.',
-      iconName: 'grid',
+      globalRules: 'vMix live production input buses, cut/fade transitions, and overlay channels.',
+      iconName: 'layers',
       accentVelocity: 24,
     },
     {
       id: 'slot_e',
-      name: 'SLOT E // SYNTH LEAD',
+      name: 'SLOT E // QLAB VIDEO CUES',
       controls: buildDefault69Map(),
-      globalRules: 'Slot E tuned scale transpose and poly synth layers.',
-      iconName: 'piano',
+      globalRules: 'QLab theater video projections, screen shutter blackout, and cue GO/HALT triggers.',
+      iconName: 'play',
       accentVelocity: 84,
     },
     {
       id: 'slot_f',
-      name: 'SLOT F // DRUM RACK',
+      name: 'SLOT F // DAVINCI RESOLVE',
       controls: buildDefault69Map(),
-      globalRules: 'Slot F 4x4 drum kit with velocity sensitivity.',
-      iconName: 'drum',
+      globalRules: 'DaVinci Resolve & Premiere timeline playhead scrubbing, node bypass, and color wheels.',
+      iconName: 'film',
       accentVelocity: 14,
     },
     {
       id: 'slot_g',
-      name: 'SLOT G // VJ MATRIX',
+      name: 'SLOT G // GRANDMA3 VIDEO/DMX',
       controls: buildDefault69Map(),
-      globalRules: 'Slot G Resolume Arena video layer triggers.',
-      iconName: 'tv',
+      globalRules: 'GrandMA3 video wall mapping, ArtNet dimmer curves, and pixel fixture chases.',
+      iconName: 'cpu',
       accentVelocity: 98,
     },
     {
       id: 'slot_h',
-      name: 'SLOT H // MASTER CUSTOM',
+      name: 'SLOT H // MASTER VIDEO RIG',
       controls: buildDefault69Map(),
-      globalRules: 'Slot H master template with custom macro routing.',
-      iconName: 'cpu',
+      globalRules: 'Master video controller surface with customized LED response and hardware routing.',
+      iconName: 'sliders',
       accentVelocity: 38,
     },
   ];

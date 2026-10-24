@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { audio } from '../audio';
+import bitchboyLogo from '../assets/bitchboy.png';
 
 export const ScrewRivet: React.FC<{ size?: number }> = ({ size = 12 }) => {
   return (
@@ -22,7 +22,6 @@ export const GlowingWordLogo: React.FC<{
 
   const handleClick = () => {
     setIsPressed(true);
-    audio.playMascotSqueak();
     if (onActivate) onActivate();
     setTimeout(() => setIsPressed(false), 200);
   };
@@ -32,27 +31,40 @@ export const GlowingWordLogo: React.FC<{
       onClick={handleClick}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      className={`relative w-full h-[68px] rounded-xl flex items-center justify-center select-none cursor-pointer transition-all duration-200 bg-black/40 border border-white/10 overflow-hidden ${
-        isPressed ? 'scale-95' : isHovered ? 'scale-102 border-teal-400/50' : 'scale-100'
+      className={`relative w-full h-[68px] rounded-xl flex items-center justify-center gap-3 px-3 select-none cursor-pointer transition-all duration-200 bg-black/50 border border-white/10 overflow-hidden ${
+        isPressed ? 'scale-95' : isHovered ? 'scale-102 border-amber-400/60' : 'scale-100'
       }`}
       style={{
         boxShadow: isHovered
           ? `0 0 24px ${auraColor}66, inset 0 0 16px ${auraColor}33`
           : `0 0 12px ${auraColor}33`,
       }}
+      title="BiTCHBOY Hardware Console"
     >
       <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent animate-pulse-subtle" />
-      <div className="relative flex flex-col items-center">
+
+      {/* Actual BitchBoy Mascot Badge */}
+      <img
+        src={bitchboyLogo}
+        alt="BitchBoy Mascot"
+        className="w-11 h-11 object-contain rounded-md shadow-md flex-shrink-0"
+        style={{
+          imageRendering: 'pixelated',
+          filter: isHovered ? `drop-shadow(0 0 8px ${auraColor})` : 'none',
+        }}
+      />
+
+      <div className="relative flex flex-col items-start">
         <span
-          className="font-mono text-2xl font-black tracking-widest text-white drop-shadow-md"
+          className="font-mono text-2xl font-black tracking-widest text-white drop-shadow-md leading-none"
           style={{
             textShadow: `0 0 10px ${auraColor}, 0 0 20px ${auraColor}`,
           }}
         >
           BiTCHBOY
         </span>
-        <span className="font-mono text-[8px] font-bold tracking-[0.25em] text-zinc-400 uppercase -mt-1">
-          Hardware System V1
+        <span className="font-mono text-[8px] font-bold tracking-[0.25em] text-amber-400 uppercase mt-0.5">
+          Video Hardware Console V1
         </span>
       </div>
     </button>
@@ -69,22 +81,20 @@ export const OfficialMascot: React.FC<{
   const [showSpeech, setShowSpeech] = useState(false);
 
   const quotes = [
-    "\"DON'T SQUEEZE THE BITCHBOY!\"",
-    "\"YOU BITCH!\"",
-    "\"MIDI PIPES ARE PURRING SMOOTH!\"",
-    "\"CRANK THAT FADER TO 127!\"",
+    "\"RESOLUME LAYER 1 IS ARMED!\"",
+    "\"OBS STREAM SCENE TRANSITION READY!\"",
+    "\"VIDEO FADER AT 127 OPACITY!\"",
     "\"PRESS SHIFT FOR MULTI-SELECT!\"",
-    "\"BEEPS, BOOPS, AND HEAVY BASS!\"",
+    "\"RGB LED FEEDBACK MATRIX ACTIVE!\"",
+    "\"TOUCHDESIGNER GENERATIVE NODES RUNNING!\"",
     "\"TAYLOR FOSSEN APPROVED! 👑\"",
-    "\"STANDING BY\"",
-    "\"FART\"",
-    "\"MY FAVORITE WORD IS BITCH\"",
+    "\"STANDING BY FOR VIDEO CUES\"",
+    "\"LED PROGRAMMING ENGINE ENGAGED!\"",
     "\"NEON GLOW AT MAXIMUM WATTAGE!\"",
   ];
 
   const handleClick = () => {
     setIsPressed(true);
-    audio.playMascotSqueak();
     const nextQuote = quotes[Math.floor(Math.random() * quotes.length)];
     setQuote(nextQuote);
     setShowSpeech(true);
@@ -99,13 +109,13 @@ export const OfficialMascot: React.FC<{
       {/* Speech Bubble */}
       {showSpeech && (
         <div
-          className="absolute -top-12 z-50 px-3 py-1.5 rounded-lg bg-black/90 border border-teal-400 text-teal-300 font-mono text-[9px] font-black tracking-wide text-center whitespace-nowrap shadow-xl animate-bounce"
+          className="absolute -top-12 z-50 px-3 py-1.5 rounded-lg bg-black/95 border border-amber-400 text-amber-300 font-mono text-[9px] font-black tracking-wide text-center whitespace-nowrap shadow-xl animate-bounce"
           style={{
-            boxShadow: `0 0 14px ${auraColor}88`,
+            boxShadow: `0 0 16px ${auraColor}88`,
           }}
         >
           {quote}
-          <div className="absolute left-1/2 -bottom-1.5 -translate-x-1/2 w-3 h-3 bg-black/90 border-r border-b border-teal-400 rotate-45" />
+          <div className="absolute left-1/2 -bottom-1.5 -translate-x-1/2 w-3 h-3 bg-black/95 border-r border-b border-amber-400 rotate-45" />
         </div>
       )}
 
@@ -114,88 +124,35 @@ export const OfficialMascot: React.FC<{
         onClick={handleClick}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
-        className={`w-[186px] h-[92px] rounded-xl flex items-center justify-center p-1.5 transition-transform duration-200 cursor-pointer bg-black/40 border border-white/10 ${
-          isPressed ? 'scale-90' : isHovered ? 'scale-105 border-pink-400/50' : 'scale-100'
+        className={`w-[186px] h-[92px] rounded-xl flex items-center justify-center p-1.5 transition-transform duration-200 cursor-pointer bg-black/60 border border-white/10 overflow-hidden relative ${
+          isPressed ? 'scale-90' : isHovered ? 'scale-105 border-amber-400/70' : 'scale-100'
         }`}
         style={{
           boxShadow: isHovered
-            ? `0 0 22px ${auraColor}88, inset 0 0 14px ${auraColor}33`
-            : `0 0 10px ${auraColor}33`,
+            ? `0 0 24px ${auraColor}aa, inset 0 0 14px ${auraColor}33`
+            : `0 0 12px ${auraColor}33`,
         }}
-        title="Click the BitchBoy Mascot!"
+        title="Click the official BitchBoy mascot!"
       >
-        {/* Crisp Pixel-Art Robot Gameboy Mascot SVG */}
-        <svg
-          viewBox="0 0 160 80"
-          className="w-full h-full drop-shadow-md select-none"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          {/* Outer Headphones */}
-          <rect x="18" y="22" width="10" height="34" rx="5" fill="#f43f5e" />
-          <rect x="132" y="22" width="10" height="34" rx="5" fill="#f43f5e" />
-          <path
-            d="M 23 24 C 23 4, 137 4, 137 24"
-            stroke="#f43f5e"
-            strokeWidth="5"
-            strokeLinecap="round"
-          />
+        {/* Subtle orange neon glow background */}
+        <div
+          className="absolute inset-0 opacity-20 pointer-events-none transition-opacity"
+          style={{
+            backgroundColor: auraColor,
+            opacity: isHovered ? 0.35 : 0.15,
+          }}
+        />
 
-          {/* Main Chassis Head */}
-          <rect
-            x="28"
-            y="12"
-            width="104"
-            height="56"
-            rx="12"
-            fill="#0f172a"
-            stroke={auraColor}
-            strokeWidth="2.5"
-          />
-
-          {/* CRT Screen Visor */}
-          <rect
-            x="36"
-            y="18"
-            width="88"
-            height="32"
-            rx="6"
-            fill="#022c22"
-            stroke="#059669"
-            strokeWidth="1.5"
-          />
-
-          {/* Glowing Eyes */}
-          <rect x="50" y="26" width="14" height="14" rx="3" fill={auraColor} />
-          <rect x="96" y="26" width="14" height="14" rx="3" fill={auraColor} />
-
-          {/* Pupils */}
-          <circle cx="58" cy="33" r="3.5" fill="#000000" />
-          <circle cx="104" cy="33" r="3.5" fill="#000000" />
-          <circle cx="60" cy="31" r="1.5" fill="#ffffff" />
-          <circle cx="106" cy="31" r="1.5" fill="#ffffff" />
-
-          {/* Cute Smile / Mouth */}
-          <path
-            d="M 72 40 Q 80 46 88 40"
-            stroke={auraColor}
-            strokeWidth="2.5"
-            strokeLinecap="round"
-          />
-
-          {/* Blushing cheeks */}
-          <circle cx="44" cy="42" r="3" fill="#f43f5e" opacity="0.8" />
-          <circle cx="116" cy="42" r="3" fill="#f43f5e" opacity="0.8" />
-
-          {/* Controller D-Pad & Buttons on lower chin */}
-          <rect x="42" y="54" width="14" height="4" rx="1" fill="#475569" />
-          <rect x="47" y="49" width="4" height="14" rx="1" fill="#475569" />
-          <circle cx="106" cy="56" r="3.5" fill="#38bdf8" />
-          <circle cx="116" cy="56" r="3.5" fill="#f43f5e" />
-
-          {/* LED Bar */}
-          <rect x="66" y="55" width="28" height="3" rx="1.5" fill={auraColor} />
-        </svg>
+        {/* The Actual BitchBoy Mascot Logo Image */}
+        <img
+          src={bitchboyLogo}
+          alt="BitchBoy Official Mascot"
+          className="w-full h-full object-contain select-none drop-shadow-lg"
+          style={{
+            imageRendering: 'pixelated',
+            filter: isHovered ? `drop-shadow(0 0 12px ${auraColor})` : 'none',
+          }}
+        />
       </button>
     </div>
   );
