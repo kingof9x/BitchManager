@@ -20,6 +20,9 @@ enum FeedbackMode: String, Codable, CaseIterable {
     case momentary = "MOMENTARY"
     case toggle = "TOGGLE"
     case staticLED = "STATIC"
+    case customVelocity = "CUSTOM COLOR"
+    case echoInbound = "ECHO VELOCITY"
+    case disabled = "DISABLED"
 }
 
 enum ActionType: String, Codable, CaseIterable {
@@ -27,6 +30,9 @@ enum ActionType: String, Codable, CaseIterable {
     case qwerty = "QWERTY_MACRO"
     case osc = "OSC_UDP"
     case applescript = "APPLESCRIPT"
+    case msc = "MSC_BROADCAST"
+    case artnet = "ARTNET_DMX"
+    case sacn = "SACN_E131"
 }
 
 enum LEDFXMode: String, CaseIterable, Identifiable {
@@ -90,34 +96,255 @@ struct BitchBoyKeyMap {
         }
         return pos
     }()
+
+    // Precomputed 49x49 key distance matrix for zero-overhead, lag-free reactive ripple & wave rendering
+    static let keyDistances: [[Double]] = {
+        var matrix = Array(repeating: Array(repeating: 0.0, count: 49), count: 49)
+        for i in 0..<49 {
+            let pi = keyPositions[i]
+            for j in 0..<49 {
+                let pj = keyPositions[j]
+                let dx = Double(pi.col - pj.col)
+                let dy = Double(pi.row - pj.row)
+                matrix[i][j] = sqrt(dx * dx + dy * dy)
+            }
+        }
+        return matrix
+    }()
+}
+
+enum StudioModuleID: String, CaseIterable, Codable, Identifiable {
+    case midiRouter = "MIDI ROUTER // OUT"
+    case memorySlots = "MEMORY SLOTS // BANK"
+    case customFXStudio = "CUSTOM FX STUDIO"
+    case reactiveKeyFX = "REACTIVE KEY FX // LIVE"
+    case showControl = "SHOW CONTROL // OSC STUDIO"
+
+    var id: String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let str = try container.decode(String.self)
+        if str == "SHOW CONTROL // MSC OSC DMX" {
+            self = .showControl
+        } else if let val = StudioModuleID(rawValue: str) {
+            self = val
+        } else {
+            self = .showControl
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .midiRouter: return "MIDI ROUTER"
+        case .memorySlots: return "MEMORY SLOTS"
+        case .customFXStudio: return "CUSTOM FX"
+        case .reactiveKeyFX: return "REACTIVE FX"
+        case .showControl: return "SHOW CTRL"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .midiRouter: return "point.3.connected.trianglepath.dotted"
+        case .memorySlots: return "memorychip.fill"
+        case .customFXStudio: return "wand.and.stars"
+        case .reactiveKeyFX: return "waveform.circle.fill"
+        case .showControl: return "dot.radiowaves.left.and.right"
+        }
+    }
+
+    // Ideal window content framing tailored for each module to prevent letterbox waste & clipping
+    var idealWindowSize: NSSize {
+        switch self {
+        case .midiRouter: return NSSize(width: 375, height: 490)
+        case .memorySlots: return NSSize(width: 375, height: 285)
+        case .customFXStudio: return NSSize(width: 375, height: 520)
+        case .reactiveKeyFX: return NSSize(width: 375, height: 265)
+        case .showControl: return NSSize(width: 420, height: 560)
+        }
+    }
+
+    var minWindowSize: NSSize {
+        switch self {
+        case .midiRouter: return NSSize(width: 320, height: 420)
+        case .memorySlots: return NSSize(width: 320, height: 245)
+        case .customFXStudio: return NSSize(width: 320, height: 450)
+        case .reactiveKeyFX: return NSSize(width: 320, height: 225)
+        case .showControl: return NSSize(width: 340, height: 460)
+        }
+    }
+
+    var defaultSlotHeight: CGFloat {
+        switch self {
+        case .midiRouter: return 340
+        case .memorySlots: return 240
+        case .customFXStudio: return 340
+        case .reactiveKeyFX: return 220
+        case .showControl: return 340
+        }
+    }
+}
+
+enum ModuleZone: String, CaseIterable, Codable {
+    case leftWing = "LEFT WING"
+    case rightWing = "RIGHT WING"
+    case bottomRack = "BOTTOM RACK"
+    case floating = "FLOATING"
+
+    var displayName: String { rawValue }
+    var iconName: String {
+        switch self {
+        case .leftWing: return "sidebar.left"
+        case .rightWing: return "sidebar.right"
+        case .bottomRack: return "rectangle.bottomthird.inset.filled"
+        case .floating: return "macwindow.badge.plus"
+        }
+    }
 }
 
 enum SoundPack: String, CaseIterable, Identifiable {
     case arcade8Bit = "8-BIT ARCADE"
     case mechanicalClick = "CHERRY MX BLUE"
     case sciFiBeeps = "SCI-FI SYNTH"
+    case customUser = "CUSTOM SOUNDS"
     case mute = "MUTE SOUNDS"
 
     var id: String { rawValue }
 }
 
-enum SoundEffect {
-    case keyTap
-    case faderSlide
-    case knobTick
-    case mascotSqueak
-    case presetSwitch
+final class CustomSoundBank {
+    static let shared = CustomSoundBank()
+    private let storageKey = "BitchBoy_CustomSoundMap_v1"
+    private(set) var soundPaths: [String: String] = [:]
+
+    private init() {
+        if let saved = UserDefaults.standard.dictionary(forKey: storageKey) as? [String: String] {
+            soundPaths = saved
+        }
+    }
+
+    func path(for effect: SoundEffect) -> String? {
+        guard let p = soundPaths[effect.rawValue], !p.isEmpty,
+              FileManager.default.fileExists(atPath: p) else {
+            return nil
+        }
+        return p
+    }
+
+    func fileName(for effect: SoundEffect) -> String? {
+        guard let p = path(for: effect) else { return nil }
+        return URL(fileURLWithPath: p).lastPathComponent
+    }
+
+    func setCustomSound(url: URL, for effect: SoundEffect) -> String? {
+        let fm = FileManager.default
+        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let soundDir = appSupport.appendingPathComponent("BitchManager/CustomSounds", isDirectory: true)
+        try? fm.createDirectory(at: soundDir, withIntermediateDirectories: true)
+
+        let ext = url.pathExtension.isEmpty ? "wav" : url.pathExtension
+        let safeKey = effect.rawValue.replacingOccurrences(of: " ", with: "_")
+        let destURL = soundDir.appendingPathComponent("\(safeKey)_\(url.deletingPathExtension().lastPathComponent).\(ext)")
+
+        try? fm.removeItem(at: destURL)
+        do {
+            try fm.copyItem(at: url, to: destURL)
+            soundPaths[effect.rawValue] = destURL.path
+            UserDefaults.standard.set(soundPaths, forKey: storageKey)
+            return destURL.path
+        } catch {
+            // Fallback to referencing original path if copy fails
+            soundPaths[effect.rawValue] = url.path
+            UserDefaults.standard.set(soundPaths, forKey: storageKey)
+            return url.path
+        }
+    }
+
+    func clearCustomSound(for effect: SoundEffect) {
+        soundPaths.removeValue(forKey: effect.rawValue)
+        UserDefaults.standard.set(soundPaths, forKey: storageKey)
+    }
+
+    func clearAllCustomSounds() {
+        soundPaths.removeAll()
+        UserDefaults.standard.removeObject(forKey: storageKey)
+    }
+
+    func playCustomIfAvailable(for effect: SoundEffect) -> Bool {
+        guard let p = path(for: effect),
+              let snd = NSSound(contentsOfFile: p, byReference: true) else {
+            return false
+        }
+        snd.stop()
+        snd.play()
+        return true
+    }
+}
+
+enum SoundEffect: String, CaseIterable, Codable, Identifiable {
+    case keyTap = "keyTap"
+    case faderSlide = "faderSlide"
+    case knobTick = "knobTick"
+    case mascotSqueak = "mascotSqueak"
+    case presetSwitch = "presetSwitch"
+    case hardwareConnected = "hardwareConnected"
+    case hardwareDisconnected = "hardwareDisconnected"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .keyTap: return "49-KEY MECHANICAL PRESS"
+        case .faderSlide: return "VERTICAL / HORIZ FADER SLIDE"
+        case .knobTick: return "ROTARY KNOB DETENT TICK"
+        case .mascotSqueak: return "BITCHBOY MASCOT & LOGO TAP"
+        case .presetSwitch: return "MEMORY SLOT / PRESET SWITCH"
+        case .hardwareConnected: return "BITCHBOY HARDWARE CONNECTED"
+        case .hardwareDisconnected: return "BITCHBOY HARDWARE DISCONNECTED"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .keyTap: return "keyboard.fill"
+        case .faderSlide: return "slider.vertical.3"
+        case .knobTick: return "dial.medium.fill"
+        case .mascotSqueak: return "sparkles"
+        case .presetSwitch: return "memorychip.fill"
+        case .hardwareConnected: return "cable.connector"
+        case .hardwareDisconnected: return "cable.connector.slash"
+        }
+    }
 
     func play(with pack: SoundPack) {
         guard pack != .mute else { return }
+
+        // If user is on CUSTOM SOUNDS pack (or has assigned a custom sound override), play their uploaded file!
+        if pack == .customUser {
+            if CustomSoundBank.shared.playCustomIfAvailable(for: self) {
+                return
+            }
+            // Fallback to 8-Bit Arcade for any slot without an uploaded file yet
+        }
+
         switch pack {
-        case .arcade8Bit:
+        case .arcade8Bit, .customUser:
             switch self {
             case .keyTap: NSSound(named: "Tink")?.play()
             case .faderSlide: NSSound(named: "Pop")?.play()
             case .knobTick: NSSound(named: "Morse")?.play()
             case .mascotSqueak: NSSound(named: "Purr")?.play()
             case .presetSwitch: NSSound(named: "Glass")?.play()
+            case .hardwareConnected:
+                NSSound(named: "Glass")?.play()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                    NSSound(named: "Hero")?.play()
+                }
+            case .hardwareDisconnected:
+                NSSound(named: "Basso")?.play()
             }
         case .mechanicalClick:
             switch self {
@@ -126,6 +353,13 @@ enum SoundEffect {
             case .knobTick: NSSound(named: "Tink")?.play()
             case .mascotSqueak: NSSound(named: "Blow")?.play()
             case .presetSwitch: NSSound(named: "Ping")?.play()
+            case .hardwareConnected:
+                NSSound(named: "Ping")?.play()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                    NSSound(named: "Glass")?.play()
+                }
+            case .hardwareDisconnected:
+                NSSound(named: "Sosumi")?.play()
             }
         case .sciFiBeeps:
             switch self {
@@ -134,10 +368,130 @@ enum SoundEffect {
             case .knobTick: NSSound(named: "Bottle")?.play()
             case .mascotSqueak: NSSound(named: "Hero")?.play()
             case .presetSwitch: NSSound(named: "Submarine")?.play()
+            case .hardwareConnected:
+                NSSound(named: "Submarine")?.play()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                    NSSound(named: "Hero")?.play()
+                }
+            case .hardwareDisconnected:
+                NSSound(named: "Blow")?.play()
             }
         case .mute:
             break
         }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// HEX COLOR SUPPORT & CUSTOM GLOWING CHASSIS THEME SYSTEM
+// ----------------------------------------------------------------------------
+extension Color {
+    init(hex: String, fallback: Color = Color(red: 0.22, green: 0.96, blue: 0.85)) {
+        let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: clean).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch clean.count {
+        case 3: // RGB (12-bit)
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6: // RGB (24-bit)
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8: // ARGB (32-bit)
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            self = fallback
+            return
+        }
+        self.init(
+            .sRGB,
+            red: Double(r) / 255.0,
+            green: Double(g) / 255.0,
+            blue: Double(b) / 255.0,
+            opacity: Double(a) / 255.0
+        )
+    }
+
+    func toHex() -> String {
+        let ns = NSColor(self).usingColorSpace(.sRGB) ?? NSColor(self)
+        let r = Int(round(max(0, min(1, ns.redComponent)) * 255))
+        let g = Int(round(max(0, min(1, ns.greenComponent)) * 255))
+        let b = Int(round(max(0, min(1, ns.blueComponent)) * 255))
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+}
+
+struct CustomChassisTheme: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var name: String
+    var pcbHex: String
+    var bezelStartHex: String
+    var bezelEndHex: String
+    var accentGlowHex: String
+    var outlineHex: String
+    var headerTextHex: String
+
+    var pcbBackground: Color { Color(hex: pcbHex, fallback: Color(red: 0.04, green: 0.24, blue: 0.21)) }
+    var outerBezelColors: [Color] {
+        [
+            Color(hex: bezelStartHex, fallback: Color(white: 0.94)),
+            Color(hex: bezelEndHex, fallback: Color(white: 0.55))
+        ]
+    }
+    var accentPrimary: Color { Color(hex: accentGlowHex, fallback: Color(red: 0.22, green: 0.96, blue: 0.85)) }
+    var sectionOutline: Color { Color(hex: outlineHex, fallback: Color(red: 0.96, green: 0.52, blue: 0.25)) }
+    var headerText: Color { Color(hex: headerTextHex, fallback: Color(red: 0.98, green: 0.90, blue: 0.65)) }
+
+    static func defaultCustom() -> CustomChassisTheme {
+        CustomChassisTheme(
+            name: "NEO TOKYO GLOW",
+            pcbHex: "#0D0A1C",
+            bezelStartHex: "#FF007F",
+            bezelEndHex: "#7928CA",
+            accentGlowHex: "#00F0FF",
+            outlineHex: "#FF007F",
+            headerTextHex: "#E0E7FF"
+        )
+    }
+
+    static func starterThemes() -> [CustomChassisTheme] {
+        [
+            CustomChassisTheme(
+                name: "NEO TOKYO GLOW",
+                pcbHex: "#0D0A1C",
+                bezelStartHex: "#FF007F",
+                bezelEndHex: "#7928CA",
+                accentGlowHex: "#00F0FF",
+                outlineHex: "#FF007F",
+                headerTextHex: "#E0E7FF"
+            ),
+            CustomChassisTheme(
+                name: "ACID LIME OVERDRIVE",
+                pcbHex: "#08140B",
+                bezelStartHex: "#39FF14",
+                bezelEndHex: "#0A4A1C",
+                accentGlowHex: "#39FF14",
+                outlineHex: "#CCFF00",
+                headerTextHex: "#E5FFD0"
+            ),
+            CustomChassisTheme(
+                name: "CYBER INFERNO",
+                pcbHex: "#1A0505",
+                bezelStartHex: "#FF3300",
+                bezelEndHex: "#8B0000",
+                accentGlowHex: "#FF4500",
+                outlineHex: "#FF9900",
+                headerTextHex: "#FFE4B5"
+            ),
+            CustomChassisTheme(
+                name: "DEEP VOID ICE",
+                pcbHex: "#040914",
+                bezelStartHex: "#00D2FF",
+                bezelEndHex: "#003366",
+                accentGlowHex: "#38E8FF",
+                outlineHex: "#0088FF",
+                headerTextHex: "#D8F3FF"
+            )
+        ]
     }
 }
 
@@ -147,6 +501,7 @@ enum ChassisTheme: String, CaseIterable, Identifiable {
     case neonCyber = "NEON CYBER"
     case royalGold = "ROYAL GOLD"
     case stealthBlack = "STEALTH NOIR"
+    case customUser = "CUSTOM THEME"
 
     var id: String { rawValue }
 
@@ -157,6 +512,7 @@ enum ChassisTheme: String, CaseIterable, Identifiable {
         case .neonCyber: return Color(red: 0.08, green: 0.02, blue: 0.18)
         case .royalGold: return Color(red: 0.18, green: 0.12, blue: 0.04)
         case .stealthBlack: return Color(red: 0.06, green: 0.06, blue: 0.07)
+        case .customUser: return BitchBoyEngine.activeCustomThemeStatic.pcbBackground
         }
     }
 
@@ -172,6 +528,8 @@ enum ChassisTheme: String, CaseIterable, Identifiable {
             return [Color(red: 0.98, green: 0.85, blue: 0.45), Color(red: 0.65, green: 0.45, blue: 0.15)]
         case .stealthBlack:
             return [Color(white: 0.35), Color(white: 0.15), Color(white: 0.08)]
+        case .customUser:
+            return BitchBoyEngine.activeCustomThemeStatic.outerBezelColors
         }
     }
 
@@ -182,6 +540,7 @@ enum ChassisTheme: String, CaseIterable, Identifiable {
         case .neonCyber: return Color(red: 1.0, green: 0.25, blue: 0.88)
         case .royalGold: return Color(red: 0.98, green: 0.82, blue: 0.35)
         case .stealthBlack: return Color(white: 0.85)
+        case .customUser: return BitchBoyEngine.activeCustomThemeStatic.accentPrimary
         }
     }
 
@@ -192,6 +551,7 @@ enum ChassisTheme: String, CaseIterable, Identifiable {
         case .neonCyber: return Color(red: 0.20, green: 0.92, blue: 0.98)
         case .royalGold: return Color(red: 0.92, green: 0.75, blue: 0.25)
         case .stealthBlack: return Color(white: 0.45)
+        case .customUser: return BitchBoyEngine.activeCustomThemeStatic.sectionOutline
         }
     }
 
@@ -202,7 +562,112 @@ enum ChassisTheme: String, CaseIterable, Identifiable {
         case .neonCyber: return Color(red: 0.95, green: 0.75, blue: 0.98)
         case .royalGold: return Color(red: 0.98, green: 0.92, blue: 0.70)
         case .stealthBlack: return Color(white: 0.80)
+        case .customUser: return BitchBoyEngine.activeCustomThemeStatic.headerText
         }
+    }
+}
+
+// ============================================================================
+// BITCHBOY HARDWARE LED COLOR SYSTEM (AUTHENTIC HARDWARE VELOCITIES)
+// ============================================================================
+
+struct BitchBoyHardwareColor {
+    // Exact mapping specified for BitchBoy hardware:
+    // Red 72 (48 Hex), Green 87, Blue 41, Yellow 74, Cyan 78, Orange 61,
+    // Purple 67, Brown 83, Off 0, White 3, Pink 95, Amber 96, Turqoise 33
+    static let off       = Color(white: 0.14)
+    static let white     = Color(red: 0.98, green: 0.98, blue: 1.00)
+    static let turquoise = Color(red: 0.16, green: 0.90, blue: 0.78)
+    static let blue      = Color(red: 0.18, green: 0.46, blue: 1.00)
+    static let orange    = Color(red: 1.00, green: 0.52, blue: 0.08)
+    static let purple    = Color(red: 0.68, green: 0.22, blue: 0.96)
+    static let red       = Color(red: 1.00, green: 0.16, blue: 0.16)
+    static let yellow    = Color(red: 1.00, green: 0.92, blue: 0.10)
+    static let cyan      = Color(red: 0.10, green: 0.94, blue: 0.98)
+    static let brown     = Color(red: 0.62, green: 0.38, blue: 0.18)
+    static let green     = Color(red: 0.16, green: 0.92, blue: 0.32)
+    static let pink      = Color(red: 1.00, green: 0.30, blue: 0.72)
+    static let amber     = Color(red: 1.00, green: 0.74, blue: 0.12)
+
+    struct Item: Identifiable, Hashable {
+        let name: String
+        let shortName: String
+        let velocity: UInt8
+        let color: Color
+        var id: UInt8 { velocity }
+    }
+
+    static let allItems: [Item] = [
+        Item(name: "OFF", shortName: "OFF", velocity: 0, color: off),
+        Item(name: "WHITE", shortName: "WHT", velocity: 3, color: white),
+        Item(name: "TURQUOISE", shortName: "TRQ", velocity: 33, color: turquoise),
+        Item(name: "BLUE", shortName: "BLU", velocity: 41, color: blue),
+        Item(name: "ORANGE", shortName: "ORG", velocity: 61, color: orange),
+        Item(name: "PURPLE", shortName: "PRP", velocity: 67, color: purple),
+        Item(name: "RED", shortName: "RED", velocity: 72, color: red),
+        Item(name: "YELLOW", shortName: "YLW", velocity: 74, color: yellow),
+        Item(name: "CYAN", shortName: "CYN", velocity: 78, color: cyan),
+        Item(name: "BROWN", shortName: "BRN", velocity: 83, color: brown),
+        Item(name: "GREEN", shortName: "GRN", velocity: 87, color: green),
+        Item(name: "PINK", shortName: "PNK", velocity: 95, color: pink),
+        Item(name: "AMBER", shortName: "AMB", velocity: 96, color: amber)
+    ]
+
+    static let knownVelocities: [UInt8] = [0, 3, 33, 41, 61, 67, 72, 74, 78, 83, 87, 95, 96]
+
+    static func closestHardwareVelocity(for vel: UInt8) -> UInt8 {
+        if vel == 0 { return 0 }
+        return knownVelocities.min(by: { abs(Int($0) - Int(vel)) < abs(Int($1) - Int(vel)) }) ?? 0
+    }
+
+    static func color(for vel: UInt8) -> Color {
+        switch vel {
+        case 0:  return off
+        case 3:  return white
+        case 33: return turquoise
+        case 41: return blue
+        case 61: return orange
+        case 67: return purple
+        case 72: return red
+        case 74: return yellow
+        case 78: return cyan
+        case 83: return brown
+        case 87: return green
+        case 95: return pink
+        case 96: return amber
+        default:
+            let nearest = knownVelocities.min(by: { abs(Int($0) - Int(vel)) < abs(Int($1) - Int(vel)) }) ?? 0
+            return color(for: nearest)
+        }
+    }
+
+    static func label(for vel: UInt8) -> String {
+        switch vel {
+        case 0:  return "OFF"
+        case 3:  return "WHITE"
+        case 33: return "TURQUOISE"
+        case 41: return "BLUE"
+        case 61: return "ORANGE"
+        case 67: return "PURPLE"
+        case 72: return "RED"
+        case 74: return "YELLOW"
+        case 78: return "CYAN"
+        case 83: return "BROWN"
+        case 87: return "GREEN"
+        case 95: return "PINK"
+        case 96: return "AMBER"
+        default:
+            let nearest = knownVelocities.min(by: { abs(Int($0) - Int(vel)) < abs(Int($1) - Int(vel)) }) ?? 0
+            return label(for: nearest)
+        }
+    }
+
+    static func formattedLabel(for vel: UInt8) -> String {
+        let lbl = label(for: vel)
+        if vel == 0 {
+            return "OFF (0)"
+        }
+        return "\(lbl) (\(vel))"
     }
 }
 
@@ -215,6 +680,82 @@ enum LEDPaletteMode: String, CaseIterable, Identifiable {
     case arcticWhite = "ARCTIC WHITE"
 
     var id: String { rawValue }
+}
+
+// ============================================================================
+// GITHUB AUTO-UPDATER DATA MODELS
+// ============================================================================
+
+struct GitHubReleaseInfo: Codable, Identifiable, Equatable {
+    var id: Int
+    var tagName: String
+    var name: String?
+    var body: String?
+    var htmlUrl: String
+    var publishedAt: String?
+    var assets: [GitHubReleaseAsset]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case tagName = "tag_name"
+        case name
+        case body
+        case htmlUrl = "html_url"
+        case publishedAt = "published_at"
+        case assets
+    }
+
+    var cleanVersion: String {
+        tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV \t\r\n"))
+    }
+
+    var bestAsset: GitHubReleaseAsset? {
+        if let zip = assets.first(where: { $0.name.lowercased().hasSuffix(".zip") }) {
+            return zip
+        }
+        if let dmg = assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) {
+            return dmg
+        }
+        return assets.first
+    }
+
+    var formattedPublishDate: String {
+        guard let publishedAt = publishedAt else { return "Recent" }
+        let isoFormatter = ISO8601DateFormatter()
+        if let date = isoFormatter.date(from: publishedAt) {
+            let df = DateFormatter()
+            df.dateStyle = .medium
+            df.timeStyle = .none
+            return df.string(from: date)
+        }
+        return String(publishedAt.prefix(10))
+    }
+}
+
+struct GitHubReleaseAsset: Codable, Identifiable, Equatable {
+    var id: Int
+    var name: String
+    var browserDownloadUrl: String
+    var size: Int
+    var contentType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case browserDownloadUrl = "browser_download_url"
+        case size
+        case contentType = "content_type"
+    }
+
+    var formattedSize: String {
+        let mb = Double(size) / (1024.0 * 1024.0)
+        if mb >= 1.0 {
+            return String(format: "%.1f MB", mb)
+        } else {
+            let kb = Double(size) / 1024.0
+            return String(format: "%.0f KB", kb)
+        }
+    }
 }
 
 struct QwertyStep: Codable, Identifiable {
@@ -234,21 +775,409 @@ struct ControlItem: Identifiable, Codable {
     var kind: ControlKind
     var number: UInt8          // MIDI Note or CC Number
     var zone: String
-    var idleVelocity: UInt8 = 20
-    var activeVelocity: UInt8 = 127
-    var currentLED: UInt8 = 20
+    var idleVelocity: UInt8 = 0
+    var activeVelocity: UInt8 = 3
+    var currentLED: UInt8 = 0
     var liveValue: UInt8 = 0
     var isPressed: Bool = false
     var toggleLatched: Bool = false
     var feedbackMode: FeedbackMode = .momentary
+    var feedbackCustomVelocity: UInt8 = 78 // Default Cyan
+    var feedbackInvert: Bool = false
     var actionType: ActionType = .passthrough
     var qwertySteps: [QwertyStep] = []
     var oscHost: String = "127.0.0.1"
     var oscPort: UInt16 = 8000
     var oscAddress: String = "/bitchboy/trigger"
+    var oscArgType: String = "NONE"
+    var oscArgValue: String = "1.0"
+    var mscCommand: UInt8 = 1 // 1 = GO
+    var mscCueNumber: String = ""
     var appleScript: String = ""
+    var oscEnabled: Bool = false
+    var oscMinVal: Double = 0.0
+    var oscMaxVal: Double = 1.0
+    var oscSendRelease: Bool = false
+    var oscReleaseVal: String = "0.0"
 
     var hasLED: Bool { kind == .key }
+
+    enum CodingKeys: String, CodingKey {
+        case label, customName, kind, number, zone
+        case idleVelocity, activeVelocity, currentLED, liveValue, isPressed, toggleLatched
+        case feedbackMode, feedbackCustomVelocity, feedbackInvert, actionType, qwertySteps
+        case oscHost, oscPort, oscAddress, oscArgType, oscArgValue
+        case mscCommand, mscCueNumber, appleScript
+        case oscEnabled, oscMinVal, oscMaxVal, oscSendRelease, oscReleaseVal
+    }
+
+    init(
+        label: String,
+        customName: String = "",
+        kind: ControlKind,
+        number: UInt8,
+        zone: String,
+        idleVelocity: UInt8 = 0,
+        activeVelocity: UInt8 = 3,
+        currentLED: UInt8 = 0,
+        liveValue: UInt8 = 0,
+        isPressed: Bool = false,
+        toggleLatched: Bool = false,
+        feedbackMode: FeedbackMode = .momentary,
+        feedbackCustomVelocity: UInt8 = 78,
+        feedbackInvert: Bool = false,
+        actionType: ActionType = .passthrough,
+        qwertySteps: [QwertyStep] = [],
+        oscHost: String = "127.0.0.1",
+        oscPort: UInt16 = 8000,
+        oscAddress: String = "/bitchboy/trigger",
+        oscArgType: String = "NONE",
+        oscArgValue: String = "1.0",
+        mscCommand: UInt8 = 1,
+        mscCueNumber: String = "",
+        appleScript: String = "",
+        oscEnabled: Bool = false,
+        oscMinVal: Double = 0.0,
+        oscMaxVal: Double = 1.0,
+        oscSendRelease: Bool = false,
+        oscReleaseVal: String = "0.0"
+    ) {
+        self.label = label
+        self.customName = customName
+        self.kind = kind
+        self.number = number
+        self.zone = zone
+        self.idleVelocity = idleVelocity
+        self.activeVelocity = activeVelocity
+        self.currentLED = currentLED
+        self.liveValue = liveValue
+        self.isPressed = isPressed
+        self.toggleLatched = toggleLatched
+        self.feedbackMode = feedbackMode
+        self.feedbackCustomVelocity = feedbackCustomVelocity
+        self.feedbackInvert = feedbackInvert
+        self.actionType = actionType
+        self.qwertySteps = qwertySteps
+        self.oscHost = oscHost
+        self.oscPort = oscPort
+        self.oscAddress = oscAddress
+        self.oscArgType = oscArgType
+        self.oscArgValue = oscArgValue
+        self.mscCommand = mscCommand
+        self.mscCueNumber = mscCueNumber
+        self.appleScript = appleScript
+        self.oscEnabled = oscEnabled
+        self.oscMinVal = oscMinVal
+        self.oscMaxVal = oscMaxVal
+        self.oscSendRelease = oscSendRelease
+        self.oscReleaseVal = oscReleaseVal
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = (try? c.decode(String.self, forKey: .label)) ?? ""
+        customName = (try? c.decode(String.self, forKey: .customName)) ?? ""
+        kind = (try? c.decode(ControlKind.self, forKey: .kind)) ?? .key
+        number = (try? c.decode(UInt8.self, forKey: .number)) ?? 0
+        zone = (try? c.decode(String.self, forKey: .zone)) ?? ""
+        idleVelocity = (try? c.decode(UInt8.self, forKey: .idleVelocity)) ?? 0
+        activeVelocity = (try? c.decode(UInt8.self, forKey: .activeVelocity)) ?? 3
+        currentLED = (try? c.decode(UInt8.self, forKey: .currentLED)) ?? 0
+        liveValue = (try? c.decode(UInt8.self, forKey: .liveValue)) ?? 0
+        isPressed = (try? c.decode(Bool.self, forKey: .isPressed)) ?? false
+        toggleLatched = (try? c.decode(Bool.self, forKey: .toggleLatched)) ?? false
+        feedbackMode = (try? c.decode(FeedbackMode.self, forKey: .feedbackMode)) ?? .momentary
+        feedbackCustomVelocity = (try? c.decode(UInt8.self, forKey: .feedbackCustomVelocity)) ?? 78
+        feedbackInvert = (try? c.decode(Bool.self, forKey: .feedbackInvert)) ?? false
+        actionType = (try? c.decode(ActionType.self, forKey: .actionType)) ?? .passthrough
+        qwertySteps = (try? c.decode([QwertyStep].self, forKey: .qwertySteps)) ?? []
+        oscHost = (try? c.decode(String.self, forKey: .oscHost)) ?? "127.0.0.1"
+        oscPort = (try? c.decode(UInt16.self, forKey: .oscPort)) ?? 8000
+        oscAddress = (try? c.decode(String.self, forKey: .oscAddress)) ?? "/bitchboy/trigger"
+        oscArgType = (try? c.decode(String.self, forKey: .oscArgType)) ?? "NONE"
+        oscArgValue = (try? c.decode(String.self, forKey: .oscArgValue)) ?? "1.0"
+        mscCommand = (try? c.decode(UInt8.self, forKey: .mscCommand)) ?? 1
+        mscCueNumber = (try? c.decode(String.self, forKey: .mscCueNumber)) ?? ""
+        appleScript = (try? c.decode(String.self, forKey: .appleScript)) ?? ""
+        oscEnabled = (try? c.decode(Bool.self, forKey: .oscEnabled)) ?? false
+        oscMinVal = (try? c.decode(Double.self, forKey: .oscMinVal)) ?? 0.0
+        oscMaxVal = (try? c.decode(Double.self, forKey: .oscMaxVal)) ?? 1.0
+        oscSendRelease = (try? c.decode(Bool.self, forKey: .oscSendRelease)) ?? false
+        oscReleaseVal = (try? c.decode(String.self, forKey: .oscReleaseVal)) ?? "0.0"
+    }
+}
+
+// ============================================================================
+// SHOW CONTROL PROTOCOL ENGINES: MSC (MIDI SHOW CONTROL), ART-NET 4 & sACN E1.31
+// ============================================================================
+
+enum MSCCommand: UInt8, CaseIterable, Identifiable, Codable {
+    case go = 0x01
+    case stop = 0x02
+    case resume = 0x03
+    case timedGo = 0x04
+    case load = 0x05
+    case set = 0x06
+    case fire = 0x07
+    case allOff = 0x08
+    case restore = 0x09
+    case reset = 0x0A
+    case goOff = 0x0B
+    case goJam = 0x11
+    case standbyPlus = 0x12
+    case standbyMinus = 0x13
+
+    var id: UInt8 { rawValue }
+
+    var title: String {
+        switch self {
+        case .go: return "GO"
+        case .stop: return "STOP"
+        case .resume: return "RESUME"
+        case .timedGo: return "TIMED GO"
+        case .load: return "LOAD"
+        case .set: return "SET"
+        case .fire: return "FIRE MACRO"
+        case .allOff: return "ALL OFF / PANIC"
+        case .restore: return "RESTORE"
+        case .reset: return "RESET"
+        case .goOff: return "GO OFF"
+        case .goJam: return "GO JAM"
+        case .standbyPlus: return "STANDBY +"
+        case .standbyMinus: return "STANDBY -"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .go: return "play.fill"
+        case .stop: return "stop.fill"
+        case .resume: return "playpause.fill"
+        case .timedGo: return "timer"
+        case .load: return "arrow.down.doc.fill"
+        case .set: return "slider.horizontal.3"
+        case .fire: return "flame.fill"
+        case .allOff: return "exclamationmark.octagon.fill"
+        case .restore: return "arrow.uturn.backward"
+        case .reset: return "arrow.clockwise"
+        case .goOff: return "xmark.circle"
+        case .goJam: return "bolt.horizontal.fill"
+        case .standbyPlus: return "plus.circle.fill"
+        case .standbyMinus: return "minus.circle.fill"
+        }
+    }
+}
+
+enum MSCCommandFormat: UInt8, CaseIterable, Identifiable, Codable {
+    case lightingGeneral = 0x01
+    case movingLights = 0x02
+    case colorChangers = 0x03
+    case soundGeneral = 0x10
+    case soundPlayback = 0x11
+    case soundEffects = 0x12
+    case machinery = 0x20
+    case videoGeneral = 0x30
+    case projection = 0x40
+    case processControl = 0x50
+    case pyro = 0x60
+    case allTypes = 0x7F
+
+    var id: UInt8 { rawValue }
+
+    var label: String {
+        switch self {
+        case .lightingGeneral: return "Lighting (General)"
+        case .movingLights: return "Moving Lights"
+        case .colorChangers: return "Color Changers"
+        case .soundGeneral: return "Sound (General)"
+        case .soundPlayback: return "Sound Playback"
+        case .soundEffects: return "Sound FX"
+        case .machinery: return "Machinery"
+        case .videoGeneral: return "Video (General)"
+        case .projection: return "Projection"
+        case .processControl: return "Process Control"
+        case .pyro: return "Pyrotechnics"
+        case .allTypes: return "All Types (Universal Broadcast)"
+        }
+    }
+}
+
+struct MSCMessage: Identifiable {
+    let id = UUID()
+    let timestamp: Date = Date()
+    let isOutbound: Bool
+    let deviceID: UInt8
+    let commandFormat: MSCCommandFormat
+    let command: MSCCommand
+    let cueNumber: String
+    let cueList: String
+    let rawBytes: [UInt8]
+
+    var summary: String {
+        let dir = isOutbound ? "TX ➡️" : "RX ⬅️"
+        let cueStr = cueNumber.isEmpty ? "" : " Cue: \(cueNumber)"
+        let listStr = cueList.isEmpty ? "" : " [List: \(cueList)]"
+        let devStr = (deviceID == 127 || deviceID == 0x7F) ? "ALL" : "\(deviceID)"
+        return "\(dir) \(command.title)\(cueStr)\(listStr) (Dev: \(devStr), \(commandFormat.label))"
+    }
+
+    var timeString: String {
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss.SS"
+        return df.string(from: timestamp)
+    }
+}
+
+struct ArtNetPacketBuilder {
+    static func buildDMXPacket(universe: UInt16, channels: [UInt8], sequence: UInt8 = 0) -> Data {
+        var data = Data()
+        // Header: "Art-Net\0"
+        data.append(contentsOf: [0x41, 0x72, 0x74, 0x2D, 0x4E, 0x65, 0x74, 0x00])
+        // OpCode: OpOutput / OpDmx (0x5000, Little Endian: 0x00, 0x50)
+        data.append(contentsOf: [0x00, 0x50])
+        // ProtVer: 14 (Big Endian: 0x00, 0x0E)
+        data.append(contentsOf: [0x00, 0x0E])
+        // Sequence & Physical
+        data.append(contentsOf: [sequence, 0x00])
+        // Universe (15-bit Port-Address, Little Endian)
+        data.append(UInt8(universe & 0xFF))
+        data.append(UInt8((universe >> 8) & 0x7F))
+        // Length: 512 channels (Big Endian: 0x02, 0x00)
+        data.append(contentsOf: [0x02, 0x00])
+        // DMX Channel Data (padded to 512)
+        var clampedChannels = channels
+        if clampedChannels.count < 512 {
+            clampedChannels.append(contentsOf: repeatElement(0, count: 512 - clampedChannels.count))
+        } else if clampedChannels.count > 512 {
+            clampedChannels = Array(clampedChannels.prefix(512))
+        }
+        data.append(contentsOf: clampedChannels)
+        return data
+    }
+}
+
+struct SACNPacketBuilder {
+    static let senderCID: [UInt8] = [
+        0x42, 0x42, 0x4D, 0x41, 0x4E, 0x41, 0x47, 0x45,
+        0x52, 0x2D, 0x53, 0x41, 0x43, 0x4E, 0x30, 0x31
+    ]
+
+    static func buildDMXPacket(universe: UInt16, priority: UInt8 = 100, channels: [UInt8], sequence: UInt8 = 0, sourceName: String = "BitchManager Pro Show Control") -> Data {
+        var data = Data()
+        // Root Layer (38 bytes)
+        data.append(contentsOf: [0x00, 0x10]) // Preamble size (16)
+        data.append(contentsOf: [0x00, 0x00]) // Postamble size (0)
+        // ACN Packet Identifier: "ASC-E1.17\0\0\0"
+        data.append(contentsOf: [0x41, 0x53, 0x43, 0x2D, 0x45, 0x31, 0x2E, 0x31, 0x37, 0x00, 0x00, 0x00])
+        // Flags and Length: 0x7000 | (638 - 16) = 0x726E
+        data.append(contentsOf: [0x72, 0x6E])
+        // Root Vector: VECTOR_ROOT_E131_DATA (0x00000004)
+        data.append(contentsOf: [0x00, 0x00, 0x00, 0x04])
+        // CID (16 bytes)
+        data.append(contentsOf: senderCID)
+
+        // Framing Layer (77 bytes)
+        // Flags and Length: 0x7000 | (638 - 38) = 0x7258
+        data.append(contentsOf: [0x72, 0x58])
+        // Framing Vector: VECTOR_E131_DATA_PACKET (0x00000002)
+        data.append(contentsOf: [0x00, 0x00, 0x00, 0x02])
+        // Source Name: 64 bytes null-padded
+        var nameData = Data(sourceName.utf8.prefix(63))
+        nameData.append(contentsOf: repeatElement(0, count: 64 - nameData.count))
+        data.append(nameData)
+        // Priority
+        data.append(priority)
+        // Sync Address (0)
+        data.append(contentsOf: [0x00, 0x00])
+        // Sequence Number
+        data.append(sequence)
+        // Options (0)
+        data.append(0x00)
+        // Universe (16-bit Big Endian)
+        data.append(UInt8((universe >> 8) & 0xFF))
+        data.append(UInt8(universe & 0xFF))
+
+        // DMP Layer (523 bytes)
+        // Flags and Length: 0x7000 | (638 - 115) = 0x720B
+        data.append(contentsOf: [0x72, 0x0B])
+        // DMP Vector: VECTOR_DMP_SET_PROPERTY (0x02)
+        data.append(0x02)
+        // Address Type & Data Type: 0xA1
+        data.append(0xA1)
+        // First Property Address: 0x0000
+        data.append(contentsOf: [0x00, 0x00])
+        // Address Increment: 0x0001
+        data.append(contentsOf: [0x00, 0x01])
+        // Property Value Count: 513 (0x0201: 1 start code + 512 DMX slots)
+        data.append(contentsOf: [0x02, 0x01])
+        // DMX Start Code: 0x00
+        data.append(0x00)
+
+        // 512 DMX Slots
+        var clampedChannels = channels
+        if clampedChannels.count < 512 {
+            clampedChannels.append(contentsOf: repeatElement(0, count: 512 - clampedChannels.count))
+        } else if clampedChannels.count > 512 {
+            clampedChannels = Array(clampedChannels.prefix(512))
+        }
+        data.append(contentsOf: clampedChannels)
+        return data
+    }
+}
+
+struct OSCPacketBuilder {
+    static func buildMessage(address: String, argType: String, argValue: String) -> Data {
+        var data = Data()
+        // Address with 4-byte padding
+        var addrData = Data(address.utf8)
+        addrData.append(0) // Null terminator
+        let addrPad = (4 - (addrData.count % 4)) % 4
+        addrData.append(contentsOf: repeatElement(0, count: addrPad))
+        data.append(addrData)
+
+        switch argType {
+        case "FLOAT":
+            var tagData = Data(",f\0".utf8)
+            let tagPad = (4 - (tagData.count % 4)) % 4
+            tagData.append(contentsOf: repeatElement(0, count: tagPad))
+            data.append(tagData)
+            let fVal = Float(argValue) ?? 1.0
+            var bigEndian = fVal.bitPattern.bigEndian
+            data.append(Data(bytes: &bigEndian, count: 4))
+        case "INT":
+            var tagData = Data(",i\0".utf8)
+            let tagPad = (4 - (tagData.count % 4)) % 4
+            tagData.append(contentsOf: repeatElement(0, count: tagPad))
+            data.append(tagData)
+            let iVal = Int32(argValue) ?? 1
+            var bigEndian = iVal.bigEndian
+            data.append(Data(bytes: &bigEndian, count: 4))
+        case "STRING":
+            var tagData = Data(",s\0".utf8)
+            let tagPad = (4 - (tagData.count % 4)) % 4
+            tagData.append(contentsOf: repeatElement(0, count: tagPad))
+            data.append(tagData)
+            var strData = Data(argValue.utf8)
+            strData.append(0)
+            let strPad = (4 - (strData.count % 4)) % 4
+            strData.append(contentsOf: repeatElement(0, count: strPad))
+            data.append(strData)
+        case "BOOLEAN_TRUE":
+            var tagData = Data(",T\0".utf8)
+            let tagPad = (4 - (tagData.count % 4)) % 4
+            tagData.append(contentsOf: repeatElement(0, count: tagPad))
+            data.append(tagData)
+        case "BOOLEAN_FALSE":
+            var tagData = Data(",F\0".utf8)
+            let tagPad = (4 - (tagData.count % 4)) % 4
+            tagData.append(contentsOf: repeatElement(0, count: tagPad))
+            data.append(tagData)
+        default: // NONE / BANG
+            let tagData = Data(",\0\0\0".utf8)
+            data.append(tagData)
+        }
+        return data
+    }
 }
 
 // --- MIDI ROUTER & TRANSFORMER MODELS ---
@@ -324,13 +1253,52 @@ struct CustomLightEffect: Codable, Identifiable {
     var waveDirection: CustomWaveDirection = .leftToRight
     var waveFrequency: Double = 1.0
     var minVelocity: UInt8 = 0
-    var maxVelocity: UInt8 = 122
+    var maxVelocity: UInt8 = 78
 
     static func emptyFrame(fill: UInt8 = 0) -> [UInt8] {
         Array(repeating: fill, count: 49)
     }
 
+    static func buildDefaultConnectEffect() -> CustomLightEffect {
+        // 10-Frame 1-Shot Hardware Connection Celebration Sweep + Checkmark Flash
+        var frames: [[UInt8]] = []
+        let sweepPalette: [UInt8] = [78, 87, 74, 95, 41, 67, 3]
+        // Frames 0..5: Expanding neon ignition ring across all 11 columns & 3x3 keypad
+        for step in 0..<6 {
+            var f = emptyFrame(fill: 0)
+            let targetColLeft = step * 2
+            let targetColRight = 10 - step * 2
+            for k in 0..<49 {
+                let p = BitchBoyKeyMap.keyPositions[k]
+                if abs(p.col - targetColLeft) <= 1 || abs(p.col - targetColRight) <= 1 {
+                    f[k] = sweepPalette[(step + p.row) % sweepPalette.count]
+                }
+            }
+            frames.append(f)
+        }
+        // Frame 6: Full green online confirmation flash
+        frames.append(emptyFrame(fill: 87))
+        // Frame 7: Brief blackout pulse
+        frames.append(emptyFrame(fill: 0))
+        // Frame 8: Cyber cyan + amber crown burst
+        var burst = emptyFrame(fill: 78)
+        for k in 40..<49 { burst[k] = 96 } // 3x3 keypad in amber
+        frames.append(burst)
+        // Frame 9: Final crisp white strobe before restoring user preset
+        frames.append(emptyFrame(fill: 3))
+
+        return CustomLightEffect(
+            name: "BITCHBOY CONNECT IGNITION",
+            isProcedural: false,
+            frames: frames,
+            fps: 14.0,
+            loopMode: .oneShot
+        )
+    }
+
     static func buildStarterEffects() -> [CustomLightEffect] {
+        let connectFX = buildDefaultConnectEffect()
+
         // 1. Neon Heart Icon Pulse (4 frames)
         var heartF1 = emptyFrame(fill: 0)
         var heartF2 = emptyFrame(fill: 0)
@@ -343,21 +1311,21 @@ struct CustomLightEffect: Codable, Identifiable {
         ]
         for (k, pos) in BitchBoyKeyMap.keyPositions.enumerated() {
             if heartCoords.contains(where: { $0.0 == pos.col && $0.1 == pos.row }) {
-                heartF1[k] = 112 // Pink
-                heartF2[k] = 5   // Red
+                heartF1[k] = 95 // Pink
+                heartF2[k] = 72 // Red
             }
         }
         let heartEffect = CustomLightEffect(
             name: "NEON HEART PULSE",
             isProcedural: false,
-            frames: [heartF1, heartF2, heartF1, emptyFrame(fill: 14)],
+            frames: [heartF1, heartF2, heartF1, emptyFrame(fill: 0)],
             fps: 5.0,
             loopMode: .loop
         )
 
         // 2. X-Matrix Cross Flash (6 frames)
         var xFrames: [[UInt8]] = []
-        let pal: [UInt8] = [68, 84, 98, 112, 24, 52]
+        let pal: [UInt8] = [78, 41, 67, 95, 74, 87]
         for step in 0..<6 {
             var f = emptyFrame(fill: 0)
             for k in 0..<49 {
@@ -378,7 +1346,7 @@ struct CustomLightEffect: Codable, Identifiable {
 
         // 3. Scrolling Neon Bar (11 frames across all 11 columns)
         var barFrames: [[UInt8]] = []
-        let barColors: [UInt8] = [5, 14, 24, 38, 52, 68, 84, 98, 112, 122, 127]
+        let barColors: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
         for c in 0..<11 {
             var f = emptyFrame(fill: 0)
             for k in 0..<49 {
@@ -386,7 +1354,7 @@ struct CustomLightEffect: Codable, Identifiable {
                 if col == c {
                     f[k] = barColors[c]
                 } else if abs(col - c) == 1 {
-                    f[k] = 14
+                    f[k] = 61 // Orange ambient glow
                 }
             }
             barFrames.append(f)
@@ -403,17 +1371,17 @@ struct CustomLightEffect: Codable, Identifiable {
         let synthEffect = CustomLightEffect(
             name: "RADIAL HYPERSPACE",
             isProcedural: true,
-            frames: [emptyFrame(fill: 68)],
+            frames: [emptyFrame(fill: 78)],
             fps: 15.0,
             loopMode: .loop,
             waveShape: .radial,
             waveDirection: .centerOut,
             waveFrequency: 1.4,
-            minVelocity: 14,
-            maxVelocity: 112
+            minVelocity: 0,
+            maxVelocity: 78
         )
 
-        return [heartEffect, xEffect, barEffect, synthEffect]
+        return [connectFX, heartEffect, xEffect, barEffect, synthEffect]
     }
 }
 
@@ -459,7 +1427,7 @@ struct PresetSlot: Codable, Identifiable {
     var controls: [ControlItem]
     var globalRules: String = ""
     var iconName: String = "dial.medium.fill"
-    var accentVelocity: UInt8 = 68
+    var accentVelocity: UInt8 = 78
 
     init(
         id: UUID = UUID(),
@@ -467,7 +1435,7 @@ struct PresetSlot: Codable, Identifiable {
         controls: [ControlItem],
         globalRules: String = "",
         iconName: String = "dial.medium.fill",
-        accentVelocity: UInt8 = 68
+        accentVelocity: UInt8 = 78
     ) {
         self.id = id
         self.name = name
@@ -488,7 +1456,7 @@ struct PresetSlot: Codable, Identifiable {
         controls = try c.decode([ControlItem].self, forKey: .controls)
         globalRules = (try? c.decode(String.self, forKey: .globalRules)) ?? ""
         iconName = (try? c.decode(String.self, forKey: .iconName)) ?? "dial.medium.fill"
-        accentVelocity = (try? c.decode(UInt8.self, forKey: .accentVelocity)) ?? 68
+        accentVelocity = (try? c.decode(UInt8.self, forKey: .accentVelocity)) ?? 78
     }
 }
 
@@ -507,7 +1475,6 @@ final class BitchBoyEngine: ObservableObject {
     // Hardware status
     @Published var isConnected: Bool = false
     @Published var deviceName: String = "BitchBoy V1 (Hardware)"
-    @Published var isLocked: Bool = false
     @Published var lastStreamMessage: String = "IDLE // READY"
     @Published var midiLogs: [String] = []
 
@@ -555,13 +1522,62 @@ final class BitchBoyEngine: ObservableObject {
     @Published var tapTempoBPM: Double = 120.0
     private var lastTapTimes: [Date] = []
     private var virtualSourceEndpoint = MIDIEndpointRef()
+    private var virtualDestinationEndpoint = MIDIEndpointRef()
+
+    // --- PRO SHOW CONTROL: MSC, OSC, ART-NET & sACN BROADCAST STATE ---
+    @Published var mscBroadcastEnabled: Bool = true
+    @Published var mscDeviceID: UInt8 = 1
+    @Published var mscCommandFormat: MSCCommandFormat = .allTypes
+    @Published var mscCueNumber: String = "1.0"
+    @Published var mscCueList: String = ""
+    @Published var mscAutoTriggerOnInbound: Bool = true
+    @Published var mscLogHistory: [MSCMessage] = []
+    private var inboundSysExBuffer: [UInt8] = []
+
+    // Custom OSC Transmitter
+    @Published var customOSCHost: String = "127.0.0.1"
+    @Published var customOSCPort: UInt16 = 53000 // Default QLab / DAW port
+    @Published var customOSCAddress: String = "/cue/selected/start"
+    @Published var customOSCArgType: String = "NONE" // NONE, FLOAT, INT, STRING, BOOLEAN_TRUE, BOOLEAN_FALSE
+    @Published var customOSCArgValue: String = "1.0"
+
+    // Art-Net 4 Transmitter
+    @Published var artNetHost: String = "127.0.0.1"
+    @Published var artNetPort: UInt16 = 6454
+    @Published var artNetUniverse: UInt16 = 0
+    @Published var artNetChannels: [UInt8] = Array(repeating: 0, count: 512)
+    @Published var artNetSequence: UInt8 = 0
+    @Published var artNetMirrorLEDs: Bool = false
+
+    // ANSI E1.31 sACN Transmitter
+    @Published var sacnHost: String = "" // Empty = standard Multicast 239.255.x.y
+    @Published var sacnPort: UInt16 = 5568
+    @Published var sacnUniverse: UInt16 = 1
+    @Published var sacnPriority: UInt8 = 100
+    @Published var sacnChannels: [UInt8] = Array(repeating: 0, count: 512)
+    @Published var sacnSequence: UInt8 = 0
+
+    // Customizable Show Control & MIDI Feedback Engine
+    @Published var hardwareFeedbackEnabled: Bool = true
+    @Published var inboundMIDIEchoEnabled: Bool = true
+    @Published var showControlSubTab: String = "OSC" // "OSC", "MSC", "ARTNET", "SACN", "FEEDBACK"
+    @Published var oscStudioMode: String = "MAPPINGS" // "MAPPINGS", "TRANSMITTER"
+    @Published var oscHardwareBroadcastEnabled: Bool = false
+    @Published var artNetMirrorHardwareFaders: Bool = false
+    @Published var grandMasterLevel: Double = 1.0
+    @Published var isBlackoutActive: Bool = false
+
+    // --- MIDI TO OSC CUSTOMIZATION MATRIX ---
+    @Published var midiToOSCMappingActive: Bool = true
+    @Published var midiToOSCFilter: String = "ALL" // "ALL", "GRID", "STRIP", "PAD", "VFADERS", "HFADERS", "MASTER_KNOBS"
+    @Published var midiToOSCSearchText: String = ""
 
     // --- RIGHT WING: CUSTOM LIGHTING FX STUDIO STATE ---
     @Published var rightWingTab: String = "SEQUENCER" // "SEQUENCER", "WAVESYNTH", "LIBRARY"
     @Published var customEffects: [CustomLightEffect] = []
     @Published var editingCustomFX: CustomLightEffect = CustomLightEffect.buildStarterEffects()[0]
     @Published var editingFrameIndex: Int = 0
-    @Published var customBrushVelocity: UInt8 = 68
+    @Published var customBrushVelocity: UInt8 = 78
     @Published var paintOnMainChassis: Bool = false
     @Published var isPlayingCustomFX: Bool = false
     @Published var activeCustomFXName: String = ""
@@ -571,7 +1587,7 @@ final class BitchBoyEngine: ObservableObject {
     // --- RIGHT WING BOTTOM: REACTIVE MECHANICAL KEYBOARD FX ENGINE STATE ---
     @Published var reactiveKeyFXMode: ReactiveKeyFXMode = .ripple
     @Published var reactiveFXSpeed: Double = 1.4
-    @Published var reactiveFXColorVelocity: UInt8 = 68 // 0 = Rainbow Dynamic, >0 = Specific Neon Color
+    @Published var reactiveFXColorVelocity: UInt8 = 78 // 0 = Rainbow Dynamic, >0 = Specific Neon Color
     @Published var reactiveFXRainbowColor: Bool = true
     @Published var activeReactivePulses: [ReactivePulseEvent] = []
     @Published var lastReactiveOriginKey: Int = -1
@@ -590,6 +1606,78 @@ final class BitchBoyEngine: ObservableObject {
     private let uiAutoFitStorageKey = "BitchBoy_UIAutoFit_v1"
 
     private let customFXStorageKey = "BitchBoy_CustomLightFX_v1"
+    private let connectFXEnabledStorageKey = "BitchBoy_ConnectFXEnabled_v1"
+    private let connectFXNameStorageKey = "BitchBoy_ConnectFXName_v1"
+
+    // --- ON-CONNECT BITCHBOY HARDWARE NOTIFICATION & CUSTOM FX STATE ---
+    @Published var connectEffectEnabled: Bool = true
+    @Published var connectCustomFXName: String = "BITCHBOY CONNECT IGNITION"
+    @Published var showConnectionBanner: Bool = false
+    @Published var connectionBannerTitle: String = "🔌 BITCHBOY CONTROLLER CONNECTED & READY"
+    @Published var connectionBannerSubtitle: String = "Hardware Recognized // Playing On-Connect FX"
+
+    // --- CUSTOM SOUND UPLOAD STUDIO & MODULE WINDOW / SPOTLIGHT / REARRANGE STATE ---
+    @Published var showCustomSoundStudio: Bool = false
+    @Published var customSoundUpdateToken: Int = 0
+    @Published var spotlightModule: StudioModuleID? = nil
+    @Published var moduleOrder: [StudioModuleID] = [.showControl, .memorySlots, .midiRouter, .customFXStudio, .reactiveKeyFX]
+    @Published var isRearrangingModules: Bool = false
+    @Published var draggingModule: StudioModuleID? = nil
+    @Published var detachedModules: Set<StudioModuleID> = []
+    fileprivate var moduleWindows: [StudioModuleID: NSWindow] = [:]
+    fileprivate var moduleWindowDelegates: [StudioModuleID: ModuleWindowCloseDelegate] = [:]
+    @Published var pinnedModuleWindows: Set<StudioModuleID> = []
+    private let moduleOrderStorageKey = "BitchBoy_ModuleOrder_v1"
+    private let soundPackStorageKey = "BitchBoy_SoundPack_v1"
+
+    // --- DYNAMIC MODULE PLACEMENT & RESIZING ENGINE ---
+    @Published var leftWingModules: [StudioModuleID] = [.showControl, .memorySlots]
+    @Published var rightWingModules: [StudioModuleID] = [.midiRouter, .customFXStudio]
+    @Published var bottomRackModules: [StudioModuleID] = [.reactiveKeyFX]
+    @Published var moduleCustomHeights: [StudioModuleID: CGFloat] = [:]
+    @Published var moduleCustomWidths: [StudioModuleID: CGFloat] = [:]
+    @Published var leftWingWidth: CGFloat = 274
+    @Published var rightWingWidth: CGFloat = 274
+    private let leftWingStorageKey = "BitchBoy_LeftWingModules_v2"
+    private let rightWingStorageKey = "BitchBoy_RightWingModules_v2"
+    private let bottomRackStorageKey = "BitchBoy_BottomRackModules_v2"
+    private let moduleHeightsStorageKey = "BitchBoy_ModuleHeights_v2"
+    private let moduleWidthsStorageKey = "BitchBoy_ModuleWidths_v2"
+
+    // --- CUSTOM THEMES STATE ---
+    static var activeCustomThemeStatic: CustomChassisTheme = CustomChassisTheme.defaultCustom()
+    @Published var customThemes: [CustomChassisTheme] = []
+    @Published var activeCustomTheme: CustomChassisTheme = CustomChassisTheme.defaultCustom() {
+        didSet {
+            Self.activeCustomThemeStatic = activeCustomTheme
+        }
+    }
+    @Published var showCustomThemeStudio: Bool = false
+    private let customThemesStorageKey = "BitchBoy_CustomThemes_v1"
+    private let activeCustomThemeIdStorageKey = "BitchBoy_ActiveCustomThemeID_v1"
+    private let themeStorageKey = "BitchBoy_ChassisTheme_v2"
+
+    // --- GITHUB RELEASES AUTO-UPDATER STATE ---
+    @Published var isCheckingForUpdates: Bool = false
+    @Published var updateAvailable: Bool = false
+    @Published var latestRelease: GitHubReleaseInfo? = nil
+    @Published var showUpdateModal: Bool = false
+    @Published var isDownloadingUpdate: Bool = false
+    @Published var updateDownloadProgress: Double = 0.0
+    @Published var updateStatusMessage: String = ""
+    @Published var updateError: String? = nil
+    @Published var lastUpdateCheckDate: Date? = nil
+    @Published var showUpToDateNotice: Bool = false
+    @Published var updateCheckResultNotice: String = ""
+    private var periodicUpdateCheckTimer: AnyCancellable?
+    private var activeDownloadTask: URLSessionDownloadTask?
+
+    var currentAppVersion: String {
+        if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
+            return v
+        }
+        return "1.0.0"
+    }
 
     private let storageKey = "BitchBoy_SavedSlots_v5"
 
@@ -598,21 +1686,32 @@ final class BitchBoyEngine: ObservableObject {
         self.slots = Self.buildDefault8MemorySlots()
         loadFromDisk()
         loadCustomEffectsFromDisk()
+        loadModuleOrderAndSoundSettings()
         loadUISettingsAndAppIcon()
         setupCoreMIDI()
         startHardwareWatchdog()
+
+        // Automatic GitHub Release Auto-Updater Check (runs 3s after boot, then every 4 hours)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.checkForUpdates(silent: true)
+        }
+        self.periodicUpdateCheckTimer = Timer.publish(every: 14400, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.checkForUpdates(silent: true)
+            }
     }
 
     static func buildDefault8MemorySlots() -> [PresetSlot] {
         [
-            PresetSlot(name: "SLOT A // PERFORMANCE", controls: Self.buildDefault69Map(), iconName: "music.mic", accentVelocity: 68),
-            PresetSlot(name: "SLOT B // DAW PRODUCTION", controls: Self.buildDefault69Map(), iconName: "slider.horizontal.3", accentVelocity: 52),
-            PresetSlot(name: "SLOT C // VISUALS & DMX", controls: Self.buildDefault69Map(), iconName: "sparkles", accentVelocity: 112),
-            PresetSlot(name: "SLOT D // STREAM DECK", controls: Self.buildDefault69Map(), iconName: "square.grid.3x3.fill", accentVelocity: 24),
-            PresetSlot(name: "SLOT E // SYNTH LEAD", controls: Self.buildDefault69Map(), iconName: "pianokeys", accentVelocity: 84),
-            PresetSlot(name: "SLOT F // DRUM RACK", controls: Self.buildDefault69Map(), iconName: "waveform.path.ecg", accentVelocity: 14),
-            PresetSlot(name: "SLOT G // VJ MATRIX", controls: Self.buildDefault69Map(), iconName: "tv.fill", accentVelocity: 98),
-            PresetSlot(name: "SLOT H // MASTER CUSTOM", controls: Self.buildDefault69Map(), iconName: "cpu.fill", accentVelocity: 38)
+            PresetSlot(name: "SLOT A // PERFORMANCE", controls: Self.buildDefault69Map(), iconName: "music.mic", accentVelocity: 78),
+            PresetSlot(name: "SLOT B // DAW PRODUCTION", controls: Self.buildDefault69Map(), iconName: "slider.horizontal.3", accentVelocity: 87),
+            PresetSlot(name: "SLOT C // VISUALS & DMX", controls: Self.buildDefault69Map(), iconName: "sparkles", accentVelocity: 95),
+            PresetSlot(name: "SLOT D // STREAM DECK", controls: Self.buildDefault69Map(), iconName: "square.grid.3x3.fill", accentVelocity: 74),
+            PresetSlot(name: "SLOT E // SYNTH LEAD", controls: Self.buildDefault69Map(), iconName: "pianokeys", accentVelocity: 41),
+            PresetSlot(name: "SLOT F // DRUM RACK", controls: Self.buildDefault69Map(), iconName: "waveform.path.ecg", accentVelocity: 72),
+            PresetSlot(name: "SLOT G // VJ MATRIX", controls: Self.buildDefault69Map(), iconName: "tv.fill", accentVelocity: 67),
+            PresetSlot(name: "SLOT H // MASTER CUSTOM", controls: Self.buildDefault69Map(), iconName: "cpu.fill", accentVelocity: 96)
         ]
     }
 
@@ -637,7 +1736,7 @@ final class BitchBoyEngine: ObservableObject {
                     number: gridNotes[r][c],
                     zone: "8X4 GRID - ROW \(r+1), COL \(c+1)",
                     idleVelocity: 0,
-                    activeVelocity: 127,
+                    activeVelocity: 3,
                     currentLED: 0,
                     feedbackMode: .momentary,
                     actionType: .passthrough
@@ -656,7 +1755,7 @@ final class BitchBoyEngine: ObservableObject {
                 number: stripNotes[i],
                 zone: "1X8 KEY STRIP - KEY \(i+1)",
                 idleVelocity: 0,
-                activeVelocity: 127,
+                activeVelocity: 3,
                 currentLED: 0,
                 feedbackMode: .momentary,
                 actionType: .passthrough
@@ -674,9 +1773,8 @@ final class BitchBoyEngine: ObservableObject {
                 number: padNotes[i],
                 zone: "3X3 KEYPAD - KEY \(i+1)",
                 idleVelocity: 0,
-                activeVelocity: 127,
-                currentLED: 0
-                ,
+                activeVelocity: 3,
+                currentLED: 0,
                 feedbackMode: .momentary,
                 actionType: .passthrough
             ))
@@ -742,10 +1840,13 @@ final class BitchBoyEngine: ObservableObject {
     private func setupCoreMIDI() {
         var status = MIDIClientCreateWithBlock("BitchBoyClient" as CFString, &midiClient) { [weak self] notifyPtr in
             let msg = notifyPtr.pointee
-            if msg.messageID == .msgSetupChanged {
+            switch msg.messageID {
+            case .msgSetupChanged, .msgObjectAdded, .msgObjectRemoved, .msgPropertyChanged:
                 Task { @MainActor [weak self] in
                     self?.scanForBitchBoy()
                 }
+            default:
+                break
             }
         }
         guard status == noErr else { return }
@@ -760,12 +1861,31 @@ final class BitchBoyEngine: ObservableObject {
             var curPacket = packets.packet
             for _ in 0..<packets.numPackets {
                 let w0 = curPacket.words.0
+                let msgType = (w0 >> 28) & 0x0F
                 let statusByte = UInt8((w0 >> 16) & 0xFF)
                 let data1 = UInt8((w0 >> 8) & 0xFF)
                 let data2 = UInt8(w0 & 0xFF)
 
-                Task { @MainActor [weak self] in
-                    self?.handleMIDIMessage(status: statusByte, data1: data1, data2: data2)
+                if msgType == 0x3 {
+                    // SysEx 7-bit UMP packet
+                    let byteCount = min(6, Int((w0 >> 16) & 0x0F))
+                    let w1 = curPacket.words.1
+                    let rawBytes: [UInt8] = [
+                        UInt8((w0 >> 8) & 0xFF),
+                        UInt8(w0 & 0xFF),
+                        UInt8((w1 >> 24) & 0xFF),
+                        UInt8((w1 >> 16) & 0xFF),
+                        UInt8((w1 >> 8) & 0xFF),
+                        UInt8(w1 & 0xFF)
+                    ]
+                    let slice = Array(rawBytes.prefix(byteCount))
+                    Task { @MainActor [weak self] in
+                        self?.handleIncomingSysExBytes(slice)
+                    }
+                } else if msgType == 0x2 || statusByte >= 0x80 {
+                    Task { @MainActor [weak self] in
+                        self?.handleMIDIMessage(status: statusByte, data1: data1, data2: data2)
+                    }
                 }
 
                 if packets.numPackets > 1 {
@@ -776,6 +1896,42 @@ final class BitchBoyEngine: ObservableObject {
 
         MIDIOutputPortCreate(midiClient, "BitchBoyOutput" as CFString, &outputPort)
         MIDISourceCreate(midiClient, "BitchBoy Virtual Out" as CFString, &virtualSourceEndpoint)
+
+        // Virtual Destination Endpoint: Named "BitchBoy Virtual In" to allow QLab / DAWs to send MSC & notes directly into BitchManager
+        status = MIDIDestinationCreateWithBlock(
+            midiClient,
+            "BitchBoy Virtual In" as CFString,
+            &virtualDestinationEndpoint
+        ) { [weak self] packetList, _ in
+            let packets = packetList.pointee
+            var curPacket = packets.packet
+            for _ in 0..<packets.numPackets {
+                let length = Int(curPacket.length)
+                if length >= 3 {
+                    withUnsafePointer(to: &curPacket.data) { dataPtr in
+                        dataPtr.withMemoryRebound(to: UInt8.self, capacity: length) { bytes in
+                            if bytes[0] == 0xF0 {
+                                let sysEx = Array(UnsafeBufferPointer(start: bytes, count: length))
+                                Task { @MainActor [weak self] in
+                                    self?.handleIncomingSysExBytes(sysEx)
+                                }
+                            } else {
+                                let statusByte = bytes[0]
+                                let data1 = bytes[1]
+                                let data2 = bytes[2]
+                                Task { @MainActor [weak self] in
+                                    self?.handleInboundExternalMIDI(status: statusByte, data1: data1, data2: data2)
+                                }
+                            }
+                        }
+                    }
+                }
+                if packets.numPackets > 1 {
+                    curPacket = MIDIPacketNext(&curPacket).pointee
+                }
+            }
+        }
+
         scanForBitchBoy()
     }
 
@@ -783,47 +1939,53 @@ final class BitchBoyEngine: ObservableObject {
         let destCount = MIDIGetNumberOfDestinations()
         var found = false
         var targetDest: MIDIEndpointRef = 0
-        var targetName = deviceName
+        var targetName = "Unplugged"
 
+        // 1. Strictly look ONLY for the physical BitchBoy hardware controller destination (NO simulated fallback!)
         for i in 0..<destCount {
             let dest = MIDIGetDestination(i)
-            let name = getEndpointName(dest)
-            if isRealBitchBoy(name) {
+            if dest == virtualDestinationEndpoint { continue }
+            if isRealBitchBoyEndpoint(dest) {
                 targetDest = dest
-                targetName = name
+                targetName = getEndpointName(dest)
                 found = true
                 break
             }
         }
 
-        if !found && destCount > 0 {
-            targetDest = MIDIGetDestination(0)
-            targetName = getEndpointName(targetDest) + " (Simulated)"
-            found = true
-        }
-
+        // 2. Connect inputPort ONLY to real BitchBoy hardware sources; disconnect any other MIDI programs!
         let srcCount = MIDIGetNumberOfSources()
         for i in 0..<srcCount {
             let src = MIDIGetSource(i)
             let sName = getEndpointName(src)
-            // Skip our own Virtual Out source to prevent MIDI loopback!
-            if src == virtualSourceEndpoint || sName.contains("BitchBoy Virtual Out") {
+            if src == virtualSourceEndpoint || sName.lowercased().contains("bitchboy virtual out") {
+                MIDIPortDisconnectSource(inputPort, src)
                 continue
             }
-            MIDIPortConnectSource(inputPort, src, nil)
+            if isRealBitchBoyEndpoint(src) {
+                MIDIPortConnectSource(inputPort, src, nil)
+                if !found {
+                    targetName = sName
+                    found = true
+                }
+            } else {
+                MIDIPortDisconnectSource(inputPort, src)
+            }
         }
 
-        // Refresh all available MIDI output destinations for the MIDI Router
+        // 3. Refresh all available MIDI output destinations for the MIDI Router
         var targets: [MIDIOutputTarget] = []
         for i in 0..<destCount {
             let dest = MIDIGetDestination(i)
             let dName = getEndpointName(dest)
-            if dName.contains("BitchBoy Virtual Out") { continue }
-            let isBB = (dest == targetDest) || isRealBitchBoy(dName)
+            if dName.lowercased().contains("bitchboy virtual out") || dName.lowercased().contains("bitchboy virtual in") || dest == virtualDestinationEndpoint { continue }
+            let isBB = (dest == targetDest && found) || isRealBitchBoyEndpoint(dest)
             targets.append(MIDIOutputTarget(name: dName, endpoint: dest, isHardwareBitchBoy: isBB))
         }
         let prevEmpty = availableOutputTargets.isEmpty
-        availableOutputTargets = targets
+        if availableOutputTargets != targets {
+            availableOutputTargets = targets
+        }
         if prevEmpty {
             // Auto-select any non-BitchBoy external DAW / IAC / Synth targets on first launch
             for t in targets where !t.isHardwareBitchBoy {
@@ -834,28 +1996,281 @@ final class BitchBoyEngine: ObservableObject {
         let wasConnected = isConnected
         let prevDest = bitchBoyDestination
 
-        bitchBoyDestination = targetDest
-        deviceName = targetName
+        bitchBoyDestination = found ? targetDest : 0
+        deviceName = found ? targetName : "Unplugged"
         isConnected = found
 
-        // CRITICAL FIX: Only send LED update when newly connected or destination changed.
-        // This eliminates the 2-second watchdog LED blinking and preserves active light shows!
-        if isConnected && (!wasConnected || prevDest != targetDest) {
-            log("🔌 Connected to \(deviceName)")
+        // CRITICAL: Only trigger connection celebration & LED sync when the physical BitchBoy controller is newly recognized!
+        if isConnected && (!wasConnected || prevDest != bitchBoyDestination) {
+            log("🔌 BitchBoy Hardware Recognized: \(deviceName)")
+            applyBitchBoyMIDIStudioIcon(silent: true)
+            triggerBitchBoyConnectedNotificationFX(isManualTest: false)
+        } else if !isConnected && wasConnected {
+            showConnectionBanner = false
+            SoundEffect.hardwareDisconnected.play(with: soundPack)
+            log("⚠️ BitchBoy Hardware Disconnected")
+        }
+    }
+
+    private func isRealBitchBoyEndpoint(_ ep: MIDIEndpointRef) -> Bool {
+        guard ep != 0, ep != virtualSourceEndpoint, ep != virtualDestinationEndpoint else { return false }
+
+        // Check if endpoint or its parent entity/device is marked offline in CoreMIDI
+        var offlineVal: Int32 = 0
+        if MIDIObjectGetIntegerProperty(ep, kMIDIPropertyOffline, &offlineVal) == noErr, offlineVal != 0 {
+            return false
+        }
+
+        var combinedNames: [String] = [
+            getStringProperty(ep, kMIDIPropertyDisplayName),
+            getStringProperty(ep, kMIDIPropertyName),
+            getStringProperty(ep, kMIDIPropertyModel),
+            getStringProperty(ep, kMIDIPropertyManufacturer)
+        ]
+
+        var entity = MIDIEntityRef()
+        if MIDIEndpointGetEntity(ep, &entity) == noErr, entity != 0 {
+            if MIDIObjectGetIntegerProperty(entity, kMIDIPropertyOffline, &offlineVal) == noErr, offlineVal != 0 {
+                return false
+            }
+            var device = MIDIDeviceRef()
+            if MIDIEntityGetDevice(entity, &device) == noErr, device != 0 {
+                if MIDIObjectGetIntegerProperty(device, kMIDIPropertyOffline, &offlineVal) == noErr, offlineVal != 0 {
+                    return false
+                }
+                combinedNames.append(getStringProperty(device, kMIDIPropertyDisplayName))
+                combinedNames.append(getStringProperty(device, kMIDIPropertyName))
+                combinedNames.append(getStringProperty(device, kMIDIPropertyModel))
+                combinedNames.append(getStringProperty(device, kMIDIPropertyManufacturer))
+            }
+        }
+
+        let joined = combinedNames.joined(separator: " ")
+        return isRealBitchBoy(joined)
+    }
+
+    private func getStringProperty(_ obj: MIDIObjectRef, _ prop: CFString) -> String {
+        var str: Unmanaged<CFString>?
+        if MIDIObjectGetStringProperty(obj, prop, &str) == noErr, let s = str {
+            return s.takeRetainedValue() as String
+        }
+        return ""
+    }
+
+    private func isRealBitchBoy(_ name: String) -> Bool {
+        let n = name.lowercased()
+        // Never treat our own virtual port or any other MIDI software/bus as the physical BitchBoy controller
+        if n.contains("bitchboy virtual out") || n.contains("bitchboy virtual in") || n.contains("virtual out") || n.contains("virtual in") || n.contains("bitchmanager") || n.contains("simulated") {
+            return false
+        }
+        if n.contains("qlab") || n.contains("iac") || n.contains("network") || n.contains("session") ||
+           n.contains("ableton") || n.contains("logic") || n.contains("mainstage") || n.contains("pro tools") ||
+           n.contains("reaper") || n.contains("bitwig") || n.contains("fl studio") || n.contains("cubase") ||
+           n.contains("garageband") || n.contains("traktor") || n.contains("serato") || n.contains("rekordbox") ||
+           n.contains("resolume") {
+            return false
+        }
+        return n.contains("bitchboy") || n.contains("bitch boy") || n.contains("block system")
+    }
+
+    // ------------------------------------------------------------------------
+    // ON-CONNECT BITCHBOY NOTIFICATION FX & MACOS MIDI STUDIO ICON ENGINE
+    // ------------------------------------------------------------------------
+    func setAsOnConnectFX(_ fx: CustomLightEffect) {
+        connectCustomFXName = fx.name
+        connectEffectEnabled = true
+        UserDefaults.standard.set(connectCustomFXName, forKey: connectFXNameStorageKey)
+        UserDefaults.standard.set(connectEffectEnabled, forKey: connectFXEnabledStorageKey)
+        SoundEffect.presetSwitch.play(with: soundPack)
+        log("🔌 Set '\(fx.name)' as the BitchBoy On-Connect Notification FX!")
+    }
+
+    func toggleConnectEffectEnabled() {
+        connectEffectEnabled.toggle()
+        UserDefaults.standard.set(connectEffectEnabled, forKey: connectFXEnabledStorageKey)
+        SoundEffect.knobTick.play(with: soundPack)
+        log(connectEffectEnabled ? "🔌 On-Connect FX: ENABLED (\(connectCustomFXName))" : "🔌 On-Connect FX: DISABLED")
+    }
+
+    func triggerBitchBoyConnectedNotificationFX(isManualTest: Bool = false) {
+        // Strictly play automatically ONLY when the real BitchBoy controller is recognized!
+        guard isConnected || isManualTest else { return }
+
+        SoundEffect.hardwareConnected.play(with: soundPack)
+
+        // 1. Show glowing on-screen HUD Connection Banner & Mascot Greeting
+        let titleName = isConnected ? deviceName.uppercased() : "BITCHBOY (PREVIEW)"
+        connectionBannerTitle = "🔌 \(titleName) CONNECTED & READY"
+        connectionBannerSubtitle = connectEffectEnabled
+            ? "PLAYING ON-CONNECT FX: \(connectCustomFXName)"
+            : "69-CONTROL HARDWARE MATRIX SYNCHRONIZED"
+
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+            showConnectionBanner = true
+            mascotSpeech = "🔌 BITCHBOY CONTROLLER ONLINE & READY!"
+            mascotSpeechVisible = true
+            mascotScale = 1.18
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                self.mascotScale = 1.0
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                self.showConnectionBanner = false
+                self.mascotSpeechVisible = false
+            }
+        }
+
+        // 2. Play the user's selected Custom On-Connect Light Show on the 49 LEDs (then restore active preset)
+        guard connectEffectEnabled else {
             if currentFXMode == .staticFX {
                 restorePresetLEDs()
             } else {
                 applyFXMode(currentFXMode)
             }
-        } else if !isConnected && wasConnected {
-            log("⚠️ BitchBoy disconnected")
+            return
+        }
+
+        let chosenFX = customEffects.first(where: { $0.name == connectCustomFXName })
+            ?? CustomLightEffect.buildDefaultConnectEffect()
+
+        var oneShotFX = chosenFX
+        if !oneShotFX.isProcedural {
+            oneShotFX.loopMode = .oneShot
+        }
+        playCustomEffect(oneShotFX)
+        log("✨ Playing BitchBoy Connection FX: '\(oneShotFX.name)'")
+
+        // If the chosen effect is procedural (continuous wave), stop it after 2.4s and restore preset LEDs
+        if oneShotFX.isProcedural {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+                guard let self = self else { return }
+                if self.isPlayingCustomFX && self.activeCustomFXName == oneShotFX.name {
+                    self.stopCustomEffect()
+                }
+            }
         }
     }
 
-    private func isRealBitchBoy(_ name: String) -> Bool {
-        let n = name.lowercased()
-        if n.contains("qlab") || n.contains("iac") || n.contains("network") || n.contains("session") { return false }
-        return n.contains("bitch") || n.contains("rp2040") || n.contains("pico") || n.contains("arduino") || n.contains("tinyusb") || n.contains("bb-") || n.contains("bb01") || n.contains("teeny")
+    func applyBitchBoyMIDIStudioIcon(style: String = "MASCOT", customFileURL: URL? = nil, silent: Bool = false) {
+        if silent {
+            // Offload disk I/O and image compression to background utility thread so UI & bootup never hitch
+            Task.detached(priority: .utility) { [weak self] in
+                await self?.performApplyBitchBoyMIDIStudioIcon(style: style, customFileURL: customFileURL, silent: true)
+            }
+        } else {
+            performApplyBitchBoyMIDIStudioIcon(style: style, customFileURL: customFileURL, silent: false)
+        }
+    }
+
+    private func performApplyBitchBoyMIDIStudioIcon(style: String = "MASCOT", customFileURL: URL? = nil, silent: Bool = false) {
+        let baseImg: NSImage?
+        if let customURL = customFileURL, let loaded = NSImage(contentsOf: customURL) {
+            baseImg = loaded
+        } else if style == "BADGE" {
+            baseImg = NSImage(named: "BitchBoyBadgeIcon")
+        } else if style == "LOGO" {
+            baseImg = NSImage(named: "BitchBoyWordLogo") ?? NSImage(named: "BitchBoyBadgeIcon")
+        } else {
+            baseImg = NSImage(named: "BitchBoyMascot")
+                ?? NSImage(contentsOfFile: "/Users/taylorfossen/Documents/BB/BB/Assets.xcassets/BitchBoyMascot.imageset/bitchboy.png")
+                ?? NSImage(named: "BitchBoyBadgeIcon")
+        }
+
+        guard let sourceImage = baseImg else {
+            if !silent { log("⚠️ Could not load BitchBoy icon image for MIDI Studio.") }
+            return
+        }
+
+        // Render a crisp 128x128 PNG (CoreMIDI kMIDIPropertyImage standard max size: 128x128)
+        let targetSize = NSSize(width: 128, height: 128)
+        let rendered = NSImage(size: targetSize)
+        rendered.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let srcSize = sourceImage.size
+        let scale = min(120.0 / max(1.0, srcSize.width), 120.0 / max(1.0, srcSize.height))
+        let drawW = srcSize.width * scale
+        let drawH = srcSize.height * scale
+        let drawRect = NSRect(x: (128.0 - drawW) * 0.5, y: (128.0 - drawH) * 0.5, width: drawW, height: drawH)
+        sourceImage.draw(in: drawRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        rendered.unlockFocus()
+
+        guard let tiffData = rendered.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData),
+              let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            return
+        }
+
+        let fm = FileManager.default
+        var savedPaths: [String] = []
+
+        // 1. Save into ~/Library/Audio/MIDI Devices/Generic/Images/BitchBoy.png (macOS Audio MIDI Setup icon directory)
+        let userMIDIImagesDir = NSHomeDirectory() + "/Library/Audio/MIDI Devices/Generic/Images"
+        try? fm.createDirectory(atPath: userMIDIImagesDir, withIntermediateDirectories: true)
+        let userMIDIIconPath = userMIDIImagesDir + "/BitchBoy.png"
+        if (try? pngData.write(to: URL(fileURLWithPath: userMIDIIconPath))) != nil {
+            savedPaths.append(userMIDIIconPath)
+        }
+
+        // 2. Also save into ~/Library/Application Support/BitchManager/BitchBoy.png
+        if let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let dir = appSupport.appendingPathComponent("BitchManager", isDirectory: true)
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            let fileURL = dir.appendingPathComponent("BitchBoy_MIDIStudio_Icon.png")
+            if (try? pngData.write(to: fileURL)) != nil {
+                savedPaths.append(fileURL.path)
+            }
+        }
+
+        guard let finalIconPath = savedPaths.first else { return }
+
+        // 3. Apply kMIDIPropertyImage to all matching BitchBoy MIDIDeviceRef / MIDIEntityRef objects in CoreMIDI!
+        var updatedCount = 0
+        let devCount = MIDIGetNumberOfDevices()
+        for i in 0..<devCount {
+            let dev = MIDIGetDevice(i)
+            let dName = getStringProperty(dev, kMIDIPropertyName) + " " + getStringProperty(dev, kMIDIPropertyDisplayName) + " " + getStringProperty(dev, kMIDIPropertyModel)
+            if dName.lowercased().contains("bitchboy") || dName.lowercased().contains("bitch boy") {
+                if MIDIObjectSetStringProperty(dev, kMIDIPropertyImage, finalIconPath as CFString) == noErr {
+                    updatedCount += 1
+                }
+            }
+        }
+
+        // Also walk from any connected BitchBoy endpoint -> entity -> device
+        if bitchBoyDestination != 0 {
+            var ent = MIDIEntityRef()
+            if MIDIEndpointGetEntity(bitchBoyDestination, &ent) == noErr, ent != 0 {
+                var dev = MIDIDeviceRef()
+                if MIDIEntityGetDevice(ent, &dev) == noErr, dev != 0 {
+                    if MIDIObjectSetStringProperty(dev, kMIDIPropertyImage, finalIconPath as CFString) == noErr {
+                        updatedCount += 1
+                    }
+                }
+            }
+        }
+
+        if !silent {
+            SoundEffect.presetSwitch.play(with: soundPack)
+            if updatedCount > 0 {
+                log("🖼️ Updated BitchBoy icon in macOS MIDI Studio! (Restart Audio MIDI Setup to refresh)")
+            } else {
+                log("🖼️ Saved BitchBoy icon to \(finalIconPath) — plug in BitchBoy to apply to MIDI Studio!")
+            }
+        }
+    }
+
+    func chooseCustomMIDIStudioIconFromDisk() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Custom Image for BitchBoy in macOS MIDI Studio"
+        panel.allowedContentTypes = [.image, .png, .jpeg, .tiff, .icns]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            applyBitchBoyMIDIStudioIcon(style: "CUSTOM", customFileURL: url, silent: false)
+        }
     }
 
     private func getEndpointName(_ ep: MIDIEndpointRef) -> String {
@@ -895,9 +2310,696 @@ final class BitchBoyEngine: ObservableObject {
         guard isConnected, bitchBoyDestination != 0 else { return }
         var packetList = MIDIPacketList()
         var curPacket = MIDIPacketListInit(&packetList)
-        let data: [UInt8] = [0xB0, cc, value]
-        curPacket = MIDIPacketListAdd(&packetList, 1024, curPacket, 0, 3, data)
+        var data: [UInt8] = [0xB0, cc, value]
+        curPacket = MIDIPacketListAdd(&packetList, 1024, curPacket, 0, 3, &data)
         MIDISend(outputPort, bitchBoyDestination, &packetList)
+    }
+
+    // High-performance batch NoteOn sender for zero-lag keyboard effects
+    func sendBatchNoteOn(notesAndVelocities: [(note: UInt8, velocity: UInt8)]) {
+        guard isConnected, bitchBoyDestination != 0, !notesAndVelocities.isEmpty else { return }
+        var buffer = [UInt8](repeating: 0, count: 2048)
+        buffer.withUnsafeMutableBytes { rawBuf in
+            guard let pktListPtr = rawBuf.baseAddress?.assumingMemoryBound(to: MIDIPacketList.self) else { return }
+            var curPacket = MIDIPacketListInit(pktListPtr)
+            for item in notesAndVelocities {
+                var data: [UInt8] = [0x90, item.note, item.velocity]
+                curPacket = MIDIPacketListAdd(pktListPtr, 2048, curPacket, 0, 3, &data)
+            }
+            MIDISend(outputPort, bitchBoyDestination, pktListPtr)
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // SHOW CONTROL: MSC (MIDI SHOW CONTROL) BROADCAST ENGINE
+    // ------------------------------------------------------------------------
+    func sendMSCBroadcast(
+        command: MSCCommand,
+        cue: String = "",
+        cueList: String = "",
+        deviceID: UInt8 = 1,
+        format: MSCCommandFormat = .allTypes
+    ) {
+        var bytes: [UInt8] = [0xF0, 0x7F, deviceID, 0x02, format.rawValue, command.rawValue]
+        if !cue.isEmpty {
+            bytes.append(contentsOf: Array(cue.utf8))
+        }
+        if !cueList.isEmpty {
+            bytes.append(0x00) // MSC Sub-Cue / List delimiter
+            bytes.append(contentsOf: Array(cueList.utf8))
+        }
+        bytes.append(0xF7) // EOX
+
+        // 1. Send to physical BitchBoy hardware
+        if isConnected, bitchBoyDestination != 0 {
+            var packetList = MIDIPacketList()
+            var curPacket = MIDIPacketListInit(&packetList)
+            curPacket = MIDIPacketListAdd(&packetList, 1024, curPacket, 0, bytes.count, &bytes)
+            MIDISend(outputPort, bitchBoyDestination, &packetList)
+        }
+
+        // 2. Send to virtual source endpoint so QLab / DAWs receive it
+        if virtualOutEnabled, virtualSourceEndpoint != 0 {
+            var packetList = MIDIPacketList()
+            var curPacket = MIDIPacketListInit(&packetList)
+            curPacket = MIDIPacketListAdd(&packetList, 1024, curPacket, 0, bytes.count, &bytes)
+            MIDIReceived(virtualSourceEndpoint, &packetList)
+        }
+
+        // 3. Send to all selected external MIDI outputs in MIDI Router
+        for target in availableOutputTargets where selectedOutputNames.contains(target.name) {
+            if target.endpoint == bitchBoyDestination { continue }
+            var packetList = MIDIPacketList()
+            var curPacket = MIDIPacketListInit(&packetList)
+            curPacket = MIDIPacketListAdd(&packetList, 1024, curPacket, 0, bytes.count, &bytes)
+            MIDISend(outputPort, target.endpoint, &packetList)
+        }
+
+        let msg = MSCMessage(
+            isOutbound: true,
+            deviceID: deviceID,
+            commandFormat: format,
+            command: command,
+            cueNumber: cue,
+            cueList: cueList,
+            rawBytes: bytes
+        )
+        mscLogHistory.insert(msg, at: 0)
+        if mscLogHistory.count > 50 {
+            mscLogHistory.removeLast()
+        }
+        log("📡 TX MSC: \(msg.summary)")
+        SoundEffect.presetSwitch.play(with: soundPack)
+    }
+
+    func handleIncomingSysExBytes(_ bytes: [UInt8]) {
+        for b in bytes {
+            if b == 0xF0 {
+                inboundSysExBuffer = [0xF0]
+            } else if b == 0xF7 {
+                if !inboundSysExBuffer.isEmpty && inboundSysExBuffer[0] == 0xF0 {
+                    inboundSysExBuffer.append(0xF7)
+                    processCompletedSysEx(inboundSysExBuffer)
+                    inboundSysExBuffer.removeAll()
+                }
+            } else if !inboundSysExBuffer.isEmpty {
+                inboundSysExBuffer.append(b)
+                if inboundSysExBuffer.count > 512 {
+                    inboundSysExBuffer.removeAll()
+                }
+            }
+        }
+    }
+
+    private func processCompletedSysEx(_ bytes: [UInt8]) {
+        // MSC SysEx: F0 7F <devID> 02 <format> <cmd> [cueData...] F7
+        guard bytes.count >= 7,
+              bytes[0] == 0xF0,
+              bytes[1] == 0x7F,
+              bytes[3] == 0x02,
+              bytes.last == 0xF7 else { return }
+
+        let deviceID = bytes[2]
+        let formatRaw = bytes[4]
+        let cmdRaw = bytes[5]
+
+        let command = MSCCommand(rawValue: cmdRaw) ?? .go
+        let format = MSCCommandFormat(rawValue: formatRaw) ?? .allTypes
+
+        var cueStr = ""
+        var listStr = ""
+        if bytes.count > 7 {
+            let dataSlice = bytes[6..<(bytes.count - 1)]
+            let parts = dataSlice.split(separator: 0x00, omittingEmptySubsequences: false)
+            if let first = parts.first, let s = String(bytes: first, encoding: .utf8) {
+                cueStr = s
+            }
+            if parts.count > 1, let s = String(bytes: parts[1], encoding: .utf8) {
+                listStr = s
+            }
+        }
+
+        let mscMsg = MSCMessage(
+            isOutbound: false,
+            deviceID: deviceID,
+            commandFormat: format,
+            command: command,
+            cueNumber: cueStr,
+            cueList: listStr,
+            rawBytes: bytes
+        )
+
+        mscLogHistory.insert(mscMsg, at: 0)
+        if mscLogHistory.count > 50 {
+            mscLogHistory.removeLast()
+        }
+        log("📥 RX MSC: \(mscMsg.summary)")
+        SoundEffect.keyTap.play(with: soundPack)
+
+        if mscAutoTriggerOnInbound {
+            handleMSCAutoTrigger(command: command, cueNumber: cueStr)
+        }
+    }
+
+    private func handleMSCAutoTrigger(command: MSCCommand, cueNumber: String) {
+        switch command {
+        case .go, .resume, .timedGo:
+            selectSlot((activeSlot + 1) % slots.count)
+            triggerRandomDemoReactiveFX()
+            log("🎬 MSC Auto-Trigger: GO -> Preset Slot \(slots[activeSlot].name)")
+        case .stop, .allOff, .reset, .goOff:
+            setZoneLEDs(range: 0..<49, velocity: 0)
+            currentFXMode = .staticFX
+            fxTimer?.cancel()
+            fxTimer = nil
+            activeReactivePulses.removeAll()
+            log("🛑 MSC Auto-Trigger: STOP / PANIC Blackout")
+        case .load:
+            if let cueInt = Int(cueNumber), cueInt >= 1, cueInt <= slots.count {
+                selectSlot(cueInt - 1)
+                log("📥 MSC Auto-Trigger: LOAD -> Preset Slot \(cueInt)")
+            }
+        case .fire:
+            triggerBitchBoyConnectedNotificationFX(isManualTest: true)
+            log("🔥 MSC Auto-Trigger: FIRE MACRO Ignition")
+        default:
+            break
+        }
+    }
+
+    func clearMSCLogHistory() {
+        mscLogHistory.removeAll()
+    }
+
+    // ------------------------------------------------------------------------
+    // SHOW CONTROL: ART-NET 4 TRANSMITTER (UDP Port 6454)
+    // ------------------------------------------------------------------------
+    func sendArtNetDMX(
+        host: String = "255.255.255.255",
+        universe: UInt16 = 0,
+        channels: [UInt8]
+    ) {
+        let packet = ArtNetPacketBuilder.buildDMXPacket(universe: universe, channels: channels, sequence: artNetSequence)
+        artNetSequence = (artNetSequence &+ 1)
+        guard let nwPort = NWEndpoint.Port(rawValue: artNetPort) else { return }
+        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .udp)
+        conn.start(queue: .global())
+        let targetPort = artNetPort
+        conn.send(content: packet, completion: .contentProcessed { [weak self] err in
+            conn.cancel()
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if let err = err {
+                    self.log("❌ Art-Net send error: \(err.localizedDescription)")
+                } else {
+                    self.log("💡 Art-Net DMX -> \(host):\(targetPort) Univ:\(universe) (512 Ch)")
+                }
+            }
+        })
+    }
+
+    func sendArtNetFullRig() {
+        let chs = Array(repeating: UInt8(255), count: 512)
+        sendArtNetDMX(host: artNetHost, universe: artNetUniverse, channels: chs)
+    }
+
+    func sendArtNetBlackout() {
+        let chs = Array(repeating: UInt8(0), count: 512)
+        sendArtNetDMX(host: artNetHost, universe: artNetUniverse, channels: chs)
+    }
+
+    func sendArtNetRGBChase() {
+        var chs = Array(repeating: UInt8(0), count: 512)
+        for i in 0..<16 {
+            chs[i * 3] = 255     // Red
+            chs[i * 3 + 1] = 128 // Green
+            chs[i * 3 + 2] = 0   // Blue
+        }
+        sendArtNetDMX(host: artNetHost, universe: artNetUniverse, channels: chs)
+    }
+
+    // ------------------------------------------------------------------------
+    // SHOW CONTROL: ANSI E1.31 sACN TRANSMITTER (UDP Port 5568)
+    // ------------------------------------------------------------------------
+    func sendsACNDMX(
+        host: String = "",
+        universe: UInt16 = 1,
+        priority: UInt8 = 100,
+        channels: [UInt8]
+    ) {
+        let packet = SACNPacketBuilder.buildDMXPacket(
+            universe: universe,
+            priority: priority,
+            channels: channels,
+            sequence: sacnSequence,
+            sourceName: "BitchManager Pro Show Control"
+        )
+        sacnSequence = (sacnSequence &+ 1)
+
+        let targetHost: String
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            let high = (universe >> 8) & 0xFF
+            let low = universe & 0xFF
+            targetHost = "239.255.\(high).\(low)"
+        } else {
+            targetHost = trimmed
+        }
+
+        guard let nwPort = NWEndpoint.Port(rawValue: sacnPort) else { return }
+        let conn = NWConnection(host: NWEndpoint.Host(targetHost), port: nwPort, using: .udp)
+        conn.start(queue: .global())
+        let currentSacnPort = sacnPort
+        conn.send(content: packet, completion: .contentProcessed { [weak self] err in
+            conn.cancel()
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if let err = err {
+                    self.log("❌ sACN send error: \(err.localizedDescription)")
+                } else {
+                    self.log("🌟 sACN E1.31 -> \(targetHost):\(currentSacnPort) Univ:\(universe) Pri:\(priority) (512 Ch)")
+                }
+            }
+        })
+    }
+
+    func sendsACNFullRig() {
+        let chs = Array(repeating: UInt8(255), count: 512)
+        sendsACNDMX(host: sacnHost, universe: sacnUniverse, priority: sacnPriority, channels: chs)
+    }
+
+    func sendsACNBlackout() {
+        let chs = Array(repeating: UInt8(0), count: 512)
+        sendsACNDMX(host: sacnHost, universe: sacnUniverse, priority: sacnPriority, channels: chs)
+    }
+
+    // ------------------------------------------------------------------------
+    // SHOW CONTROL: CUSTOM OSC TRANSMITTER (UDP)
+    // ------------------------------------------------------------------------
+    func sendCustomOSC(
+        host: String,
+        port: UInt16,
+        address: String,
+        argType: String,
+        argValue: String
+    ) {
+        let packet = OSCPacketBuilder.buildMessage(address: address, argType: argType, argValue: argValue)
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .udp)
+        conn.start(queue: .global())
+        conn.send(content: packet, completion: .contentProcessed { [weak self] err in
+            conn.cancel()
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if let err = err {
+                    self.log("❌ OSC send error: \(err.localizedDescription)")
+                } else {
+                    let valStr = argType == "NONE" ? "" : " [\(argType): \(argValue)]"
+                    self.log("📡 OSC UDP -> \(host):\(port) \(address)\(valStr)")
+                }
+            }
+        })
+    }
+
+    // ------------------------------------------------------------------------
+    // MIDI TO OSC CUSTOM MAPPING ENGINE (INDIVIDUAL KEYS & FADERS)
+    // ------------------------------------------------------------------------
+    func filteredControlIndices() -> [Int] {
+        var indices = Array(0..<controls.count)
+        switch midiToOSCFilter {
+        case "GRID":
+            indices = indices.filter { $0 < 32 }
+        case "STRIP":
+            indices = indices.filter { $0 >= 32 && $0 < 40 }
+        case "PAD":
+            indices = indices.filter { $0 >= 40 && $0 < 49 }
+        case "VFADERS":
+            indices = indices.filter { $0 >= 49 && $0 < 57 }
+        case "HFADERS":
+            indices = indices.filter { $0 >= 57 && $0 < 61 }
+        case "MASTER_KNOBS":
+            indices = indices.filter { $0 >= 61 }
+        default:
+            break
+        }
+        let query = midiToOSCSearchText.trimmingCharacters(in: .whitespaces).lowercased()
+        if !query.isEmpty {
+            indices = indices.filter { idx in
+                let item = controls[idx]
+                return item.label.lowercased().contains(query) ||
+                       item.customName.lowercased().contains(query) ||
+                       item.zone.lowercased().contains(query) ||
+                       item.oscAddress.lowercased().contains(query) ||
+                       "\(item.number)".contains(query)
+            }
+        }
+        return indices
+    }
+
+    func sendOSCForControl(index: Int, isPress: Bool = true, liveVal: UInt8? = nil) {
+        guard midiToOSCMappingActive, index >= 0, index < controls.count else { return }
+        let item = controls[index]
+        guard item.oscEnabled || item.actionType == .osc else { return }
+
+        let targetHost = item.oscHost.trimmingCharacters(in: .whitespaces).isEmpty ? customOSCHost : item.oscHost.trimmingCharacters(in: .whitespaces)
+        let targetPort = item.oscPort == 0 ? customOSCPort : item.oscPort
+        var targetAddr = item.oscAddress.trimmingCharacters(in: .whitespaces)
+        if targetAddr.isEmpty {
+            if item.kind == .vfader || item.kind == .hfader || item.kind == .knob {
+                targetAddr = "/bitchboy/fader/\(max(1, index - 48))"
+            } else {
+                targetAddr = "/bitchboy/key/\(index + 1)"
+            }
+        }
+        if !targetAddr.hasPrefix("/") {
+            targetAddr = "/" + targetAddr
+        }
+
+        if isPress {
+            if item.kind == .vfader || item.kind == .hfader || item.kind == .knob {
+                let rawVal = liveVal ?? item.liveValue
+                let norm = Double(rawVal) / 127.0
+                let scaled = item.oscMinVal + norm * (item.oscMaxVal - item.oscMinVal)
+                switch item.oscArgType {
+                case "INT":
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "INT", argValue: "\(Int32(round(scaled)))")
+                case "NONE":
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "NONE", argValue: "")
+                case "STRING":
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "STRING", argValue: item.oscArgValue)
+                default: // FLOAT
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "FLOAT", argValue: String(format: "%.3f", scaled))
+                }
+            } else {
+                // Key / Button press
+                switch item.oscArgType {
+                case "BOOLEAN":
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "BOOLEAN_TRUE", argValue: "1")
+                case "INT":
+                    let rawV = liveVal ?? item.activeVelocity
+                    let intVal = item.oscArgValue.trimmingCharacters(in: .whitespaces).isEmpty ? "\(rawV)" : item.oscArgValue
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "INT", argValue: intVal)
+                case "FLOAT":
+                    let floatVal = item.oscArgValue.trimmingCharacters(in: .whitespaces).isEmpty ? "1.0" : item.oscArgValue
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "FLOAT", argValue: floatVal)
+                case "STRING":
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "STRING", argValue: item.oscArgValue)
+                default: // NONE / BANG
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "NONE", argValue: "")
+                }
+            }
+        } else {
+            // Key release
+            if item.oscSendRelease {
+                if item.oscArgType == "BOOLEAN" {
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "BOOLEAN_FALSE", argValue: "0")
+                } else if item.oscArgType == "INT" {
+                    let relVal = item.oscReleaseVal.trimmingCharacters(in: .whitespaces).isEmpty ? "0" : item.oscReleaseVal
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "INT", argValue: relVal)
+                } else if item.oscArgType == "FLOAT" {
+                    let relVal = item.oscReleaseVal.trimmingCharacters(in: .whitespaces).isEmpty ? "0.0" : item.oscReleaseVal
+                    sendCustomOSC(host: targetHost, port: targetPort, address: targetAddr, argType: "FLOAT", argValue: relVal)
+                }
+            }
+        }
+    }
+
+    func applyOSCAutoMapTemplate() {
+        for i in 0..<controls.count {
+            controls[i].oscEnabled = true
+            controls[i].oscHost = customOSCHost
+            controls[i].oscPort = customOSCPort
+            if i < 49 {
+                controls[i].oscAddress = "/bitchboy/key/\(i + 1)"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscArgValue = "1.0"
+                controls[i].oscSendRelease = true
+                controls[i].oscReleaseVal = "0.0"
+            } else if i >= 49 && i < 57 {
+                controls[i].oscAddress = "/bitchboy/fader/\(i - 48)"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            } else if i >= 57 && i < 61 {
+                controls[i].oscAddress = "/bitchboy/fader/h/\(i - 56)"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            } else {
+                controls[i].oscAddress = "/bitchboy/knob/\(i - 60)"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            }
+        }
+        log("⚡ OSC Auto-Map Template Applied: All 65 controls configured with standard /bitchboy endpoints")
+        SoundEffect.presetSwitch.play(with: soundPack)
+    }
+
+    func applyOSCQLabTemplate() {
+        customOSCPort = 53000
+        for i in 0..<controls.count {
+            controls[i].oscEnabled = true
+            controls[i].oscHost = customOSCHost
+            controls[i].oscPort = 53000
+            if i < 32 {
+                controls[i].customName = "Cue \(i + 1)"
+                controls[i].oscAddress = "/cue/\(i + 1)/start"
+                controls[i].oscArgType = "NONE"
+                controls[i].oscSendRelease = false
+            } else if i == 32 {
+                controls[i].customName = "QLab GO"
+                controls[i].oscAddress = "/go"
+                controls[i].oscArgType = "NONE"
+            } else if i == 33 {
+                controls[i].customName = "Panic All"
+                controls[i].oscAddress = "/panic"
+                controls[i].oscArgType = "NONE"
+            } else if i == 34 {
+                controls[i].customName = "Hard Stop"
+                controls[i].oscAddress = "/hardStop"
+                controls[i].oscArgType = "NONE"
+            } else if i == 35 {
+                controls[i].customName = "Pause"
+                controls[i].oscAddress = "/pause"
+                controls[i].oscArgType = "NONE"
+            } else if i == 36 {
+                controls[i].customName = "Resume"
+                controls[i].oscAddress = "/resume"
+                controls[i].oscArgType = "NONE"
+            } else if i == 37 {
+                controls[i].customName = "Prev Cue"
+                controls[i].oscAddress = "/previous"
+                controls[i].oscArgType = "NONE"
+            } else if i == 38 {
+                controls[i].customName = "Next Cue"
+                controls[i].oscAddress = "/next"
+                controls[i].oscArgType = "NONE"
+            } else if i == 39 {
+                controls[i].customName = "Reset"
+                controls[i].oscAddress = "/reset"
+                controls[i].oscArgType = "NONE"
+            } else if i >= 40 && i < 49 {
+                controls[i].customName = "Cue Pad \(i - 39)"
+                controls[i].oscAddress = "/cue/\(i - 39)/start"
+                controls[i].oscArgType = "NONE"
+            } else if i >= 49 && i < 57 {
+                let fIdx = i - 48
+                controls[i].customName = "Cue \(fIdx) Vol"
+                controls[i].oscAddress = "/cue/\(fIdx)/sliderLevel/1"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = -60.0
+                controls[i].oscMaxVal = 12.0
+            } else if i >= 57 && i < 61 {
+                let hIdx = i - 56
+                controls[i].customName = "Aux \(hIdx)"
+                controls[i].oscAddress = "/cue/selected/level/\(hIdx)"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            } else {
+                controls[i].customName = "Master Level"
+                controls[i].oscAddress = "/masterVolume"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            }
+        }
+        log("🎭 QLab OSC Template Applied: Port 53000, 32 Cues, Transport Keys & 8 Volume Faders")
+        SoundEffect.presetSwitch.play(with: soundPack)
+    }
+
+    func applyOSCResolumeTemplate() {
+        customOSCPort = 7000
+        for i in 0..<controls.count {
+            controls[i].oscEnabled = true
+            controls[i].oscHost = customOSCHost
+            controls[i].oscPort = 7000
+            if i < 32 {
+                let layer = (i % 4) + 1
+                let clip = (i / 4) + 1
+                controls[i].customName = "L\(layer) C\(clip)"
+                controls[i].oscAddress = "/composition/layers/\(layer)/clips/\(clip)/connect"
+                controls[i].oscArgType = "INT"
+                controls[i].oscArgValue = "1"
+            } else if i >= 49 && i < 57 {
+                let layer = i - 48
+                controls[i].customName = "Layer \(layer) Opacity"
+                controls[i].oscAddress = "/composition/layers/\(layer)/video/opacity"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            } else if i >= 61 {
+                controls[i].customName = "Master Opacity"
+                controls[i].oscAddress = "/composition/master"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            }
+        }
+        log("🎬 Resolume OSC Template Applied: Port 7000, Clip Grid Matrix & Layer Opacity Faders")
+        SoundEffect.presetSwitch.play(with: soundPack)
+    }
+
+    func applyOSCEosTemplate() {
+        customOSCPort = 8000
+        for i in 0..<controls.count {
+            controls[i].oscEnabled = true
+            controls[i].oscHost = customOSCHost
+            controls[i].oscPort = 8000
+            if i < 32 {
+                controls[i].customName = "EOS Key \(i + 1)"
+                controls[i].oscAddress = "/eos/key/\(i + 1)"
+                controls[i].oscArgType = "NONE"
+            } else if i == 32 {
+                controls[i].customName = "EOS GO"
+                controls[i].oscAddress = "/eos/key/go_0"
+                controls[i].oscArgType = "NONE"
+            } else if i == 33 {
+                controls[i].customName = "EOS Stop"
+                controls[i].oscAddress = "/eos/key/stop"
+                controls[i].oscArgType = "NONE"
+            } else if i >= 49 && i < 57 {
+                let fIdx = i - 48
+                controls[i].customName = "Submaster \(fIdx)"
+                controls[i].oscAddress = "/eos/fader/1/\(fIdx)"
+                controls[i].oscArgType = "FLOAT"
+                controls[i].oscMinVal = 0.0
+                controls[i].oscMaxVal = 1.0
+            }
+        }
+        log("💡 ETC EOS OSC Template Applied: Port 8000, Go/Stop & Submaster Faders")
+        SoundEffect.presetSwitch.play(with: soundPack)
+    }
+
+    func clearAllOSCMappings() {
+        for i in 0..<controls.count {
+            controls[i].oscEnabled = false
+            controls[i].oscAddress = ""
+            controls[i].customName = ""
+        }
+        log("🧹 All MIDI to OSC Mappings Cleared")
+        SoundEffect.keyTap.play(with: soundPack)
+    }
+
+    func toggleAllOSCMappings(enabled: Bool) {
+        for i in 0..<controls.count {
+            controls[i].oscEnabled = enabled
+        }
+        log("🔄 All MIDI to OSC Mappings: \(enabled ? "ENABLED" : "DISABLED")")
+        SoundEffect.knobTick.play(with: soundPack)
+    }
+
+    // ------------------------------------------------------------------------
+    // SHOW CONTROL PROTOCOL UTILITIES: BLACKOUT, MASTER & RIG CONTROL
+    // ------------------------------------------------------------------------
+    func panicBlackoutAll() {
+        isBlackoutActive = true
+        sendArtNetBlackout()
+        sendsACNBlackout()
+        sendMSCBroadcast(command: .allOff, cue: "", deviceID: 127)
+        sendCustomOSC(host: customOSCHost, port: customOSCPort, address: "/panic", argType: "NONE", argValue: "")
+        sendPanicAllNotesOffToOutputs()
+        setZoneLEDs(range: 0..<49, velocity: 0)
+        SoundEffect.hardwareDisconnected.play(with: soundPack)
+        log("🚨 PANIC BLACKOUT EXECUTED: All Lighting, Audio, MSC & MIDI Silenced")
+    }
+
+    func toggleBlackout() {
+        isBlackoutActive.toggle()
+        if isBlackoutActive {
+            panicBlackoutAll()
+        } else {
+            sendArtNetFullRig()
+            sendsACNFullRig()
+            SoundEffect.presetSwitch.play(with: soundPack)
+            log("💡 Blackout Disengaged — Restored Rig Levels")
+        }
+    }
+
+    func flashRigMomentary() {
+        SoundEffect.presetSwitch.play(with: soundPack)
+        let savedGM = grandMasterLevel
+        grandMasterLevel = 1.0
+        sendArtNetFullRig()
+        sendsACNFullRig()
+        setZoneLEDs(range: 0..<49, velocity: 3)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            self.grandMasterLevel = savedGM
+            if self.isBlackoutActive {
+                self.sendArtNetBlackout()
+                self.sendsACNBlackout()
+                self.setZoneLEDs(range: 0..<49, velocity: 0)
+            } else {
+                self.sendArtNetFullRig()
+            }
+        }
+    }
+
+    func setGrandMaster(_ level: Double) {
+        grandMasterLevel = max(0.0, min(1.0, level))
+        for i in 0..<8 {
+            let baseVal = Double(controls[49 + i].liveValue) * 2.0
+            artNetChannels[i] = UInt8(max(0.0, min(255.0, baseVal * grandMasterLevel)))
+        }
+        sendArtNetDMX(host: artNetHost, universe: artNetUniverse, channels: artNetChannels)
+    }
+
+    // ------------------------------------------------------------------------
+    // INBOUND EXTERNAL MIDI (DAWs, QLab, Virtual Endpoint) & FEEDBACK ECHO
+    // ------------------------------------------------------------------------
+    func handleInboundExternalMIDI(status: UInt8, data1: UInt8, data2: UInt8) {
+        let msgType = status & 0xF0
+        let isNoteOn = (msgType == 0x90) && (data2 > 0)
+        let isNoteOff = (msgType == 0x80) || ((msgType == 0x90) && (data2 == 0))
+        let isCC = (msgType == 0xB0)
+
+        guard let idx = controls.firstIndex(where: {
+            if isCC { return ($0.kind == .vfader || $0.kind == .hfader || $0.kind == .knob) && $0.number == data1 }
+            else { return $0.kind == .key && $0.number == data1 }
+        }) else { return }
+
+        if isNoteOn {
+            controls[idx].isPressed = true
+            lastStreamMessage = "[EXT RX // \(controls[idx].label)] NOTE #\(data1) VEL:\(data2)"
+            if inboundMIDIEchoEnabled && idx < 49 {
+                let echoVel = BitchBoyHardwareColor.closestHardwareVelocity(for: data2)
+                controls[idx].currentLED = echoVel
+                sendNoteOn(note: data1, velocity: echoVel)
+                triggerReactiveKeyFX(at: idx)
+            }
+        } else if isNoteOff {
+            controls[idx].isPressed = false
+            if inboundMIDIEchoEnabled && idx < 49 && activeReactivePulses.isEmpty {
+                let restore = controls[idx].idleVelocity
+                controls[idx].currentLED = restore
+                sendNoteOn(note: data1, velocity: restore)
+            }
+        } else if isCC {
+            controls[idx].liveValue = data2
+            lastStreamMessage = "[EXT RX // \(controls[idx].label)] CC #\(data1) VAL:\(data2)"
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -938,24 +3040,36 @@ final class BitchBoyEngine: ObservableObject {
         lastStreamMessage = "[\(controls[index].label)] PRESS #\(note) V:\(activeVel)"
         log("🎹 Tap: \(controls[index].label) (Note #\(note) Vel: \(activeVel))")
 
-        switch controls[index].feedbackMode {
-        case .momentary:
-            controls[index].currentLED = activeVel
-            sendNoteOn(note: note, velocity: activeVel)
-        case .toggle:
-            controls[index].toggleLatched.toggle()
-            let v = controls[index].toggleLatched ? activeVel : controls[index].idleVelocity
-            controls[index].currentLED = v
-            sendNoteOn(note: note, velocity: v)
-        case .staticLED:
-            controls[index].currentLED = controls[index].idleVelocity
-            sendNoteOn(note: note, velocity: controls[index].idleVelocity)
+        if hardwareFeedbackEnabled {
+            switch controls[index].feedbackMode {
+            case .momentary:
+                controls[index].currentLED = activeVel
+                sendNoteOn(note: note, velocity: activeVel)
+            case .toggle:
+                controls[index].toggleLatched.toggle()
+                let v = controls[index].toggleLatched ? activeVel : controls[index].idleVelocity
+                controls[index].currentLED = v
+                sendNoteOn(note: note, velocity: v)
+            case .staticLED:
+                controls[index].currentLED = controls[index].idleVelocity
+                sendNoteOn(note: note, velocity: controls[index].idleVelocity)
+            case .customVelocity:
+                let v = controls[index].feedbackCustomVelocity
+                controls[index].currentLED = v
+                sendNoteOn(note: note, velocity: v)
+            case .echoInbound:
+                controls[index].currentLED = activeVel
+                sendNoteOn(note: note, velocity: activeVel)
+            case .disabled:
+                break
+            }
         }
 
         executeAction(for: controls[index])
         if index < 49 {
             triggerReactiveKeyFX(at: index)
         }
+        sendOSCForControl(index: index, isPress: true)
         if forwardUIInteractions {
             routeIncomingMIDIToTargets(status: 0x90, data1: note, data2: activeVel, isFromHardware: false)
         }
@@ -963,10 +3077,13 @@ final class BitchBoyEngine: ObservableObject {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 120_000_000)
             self.controls[index].isPressed = false
-            if self.controls[index].feedbackMode == .momentary && self.activeReactivePulses.isEmpty {
+            self.sendOSCForControl(index: index, isPress: false)
+            if (self.controls[index].feedbackMode == .momentary || self.controls[index].feedbackMode == .customVelocity) && self.activeReactivePulses.isEmpty {
                 let idleVel = self.controls[index].idleVelocity
                 self.controls[index].currentLED = idleVel
-                self.sendNoteOn(note: note, velocity: idleVel)
+                if self.hardwareFeedbackEnabled {
+                    self.sendNoteOn(note: note, velocity: idleVel)
+                }
                 self.lastStreamMessage = "[\(self.controls[index].label)] RELEASE #\(note) V:\(idleVel)"
             }
             if self.forwardUIInteractions {
@@ -982,7 +3099,7 @@ final class BitchBoyEngine: ObservableObject {
         guard keyIndex >= 0 && keyIndex < 49, reactiveKeyFXMode != .off else { return }
         lastReactiveOriginKey = keyIndex
         let pos = BitchBoyKeyMap.keyPositions[keyIndex]
-        let palette: [UInt8] = [5, 14, 24, 38, 52, 68, 84, 98, 112, 127]
+        let palette: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
         let chosenVel: UInt8 = reactiveFXRainbowColor
             ? palette[(keyIndex * 3 + activeReactivePulses.count * 2) % palette.count]
             : reactiveFXColorVelocity
@@ -1010,7 +3127,8 @@ final class BitchBoyEngine: ObservableObject {
 
         if reactiveFXTimer == nil {
             lastSentReactiveLEDs = Array(repeating: 255, count: 49)
-            reactiveFXTimer = Timer.publish(every: 0.035, on: .main, in: .common)
+            // Ultra-smooth 40 FPS timer
+            reactiveFXTimer = Timer.publish(every: 0.025, on: .main, in: .common)
                 .autoconnect()
                 .sink { [weak self] _ in
                     self?.stepReactiveKeyFX()
@@ -1030,22 +3148,26 @@ final class BitchBoyEngine: ObservableObject {
     }
 
     private func stepReactiveKeyFX() {
-        let dt = 0.048 * max(0.3, reactiveFXSpeed)
+        let dt = 0.025 * max(0.3, reactiveFXSpeed)
         for i in activeReactivePulses.indices {
             activeReactivePulses[i].age += dt
         }
         activeReactivePulses.removeAll { $0.age > 1.05 }
 
-        let palette: [UInt8] = [5, 14, 24, 38, 52, 68, 84, 98, 112, 127]
+        let palette: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
+
+        var batch = controls
+        var didChange = false
+        var batchNotes: [(note: UInt8, velocity: UInt8)] = []
 
         for k in 0..<49 {
             let baseVel: UInt8
-            if controls[k].isPressed {
-                baseVel = controls[k].activeVelocity
-            } else if controls[k].feedbackMode == .toggle && controls[k].toggleLatched {
-                baseVel = controls[k].activeVelocity
+            if batch[k].isPressed {
+                baseVel = batch[k].activeVelocity
+            } else if batch[k].feedbackMode == .toggle && batch[k].toggleLatched {
+                baseVel = batch[k].activeVelocity
             } else {
-                baseVel = controls[k].idleVelocity
+                baseVel = batch[k].idleVelocity
             }
 
             var effectVel: UInt8 = 0
@@ -1055,9 +3177,10 @@ final class BitchBoyEngine: ObservableObject {
             let kr = Double(kPos.row)
 
             for pulse in activeReactivePulses {
+                // Zero-cost precomputed distance lookup matrix
+                let dist = BitchBoyKeyMap.keyDistances[k][pulse.originKeyIndex]
                 let dx = kc - pulse.originCol
                 let dy = kr - pulse.originRow
-                let dist = sqrt(dx * dx + dy * dy)
                 var intensity: Double = 0.0
 
                 switch pulse.mode {
@@ -1113,21 +3236,31 @@ final class BitchBoyEngine: ObservableObject {
                     maxIntensity = intensity
                     if reactiveFXRainbowColor {
                         let pIdx = abs(Int(round(dist + pulse.age * 8.0)) + pulse.originKeyIndex) % palette.count
-                        effectVel = intensity > 0.72 ? 127 : palette[pIdx]
+                        effectVel = intensity > 0.72 ? 3 : palette[pIdx]
                     } else {
-                        effectVel = intensity > 0.82 ? 127 : pulse.baseVelocity
+                        effectVel = intensity > 0.82 ? 3 : pulse.baseVelocity
                     }
                 }
             }
 
             let finalVel: UInt8 = maxIntensity > 0.14 ? effectVel : baseVel
-            if controls[k].currentLED != finalVel {
-                controls[k].currentLED = finalVel
+            if batch[k].currentLED != finalVel {
+                batch[k].currentLED = finalVel
+                didChange = true
             }
             if lastSentReactiveLEDs[k] != finalVel {
                 lastSentReactiveLEDs[k] = finalVel
-                sendNoteOn(note: controls[k].number, velocity: finalVel)
+                batchNotes.append((note: batch[k].number, velocity: finalVel))
             }
+        }
+
+        if didChange {
+            controls = batch
+        }
+
+        // Send all changed LEDs in a single batch MIDI packet list
+        if !batchNotes.isEmpty {
+            sendBatchNoteOn(notesAndVelocities: batchNotes)
         }
 
         if activeReactivePulses.isEmpty {
@@ -1144,6 +3277,7 @@ final class BitchBoyEngine: ObservableObject {
         if forwardUIInteractions {
             routeIncomingMIDIToTargets(status: 0xB0, data1: controls[index].number, data2: value, isFromHardware: false)
         }
+        sendOSCForControl(index: index, isPress: true, liveVal: value)
         lastStreamMessage = "[\(controls[index].label)] CC #\(controls[index].number) VAL: \(value)"
         SoundEffect.faderSlide.play(with: soundPack)
         if currentFXMode == .vuMeter && index >= 49 && index < 57 {
@@ -1234,7 +3368,7 @@ final class BitchBoyEngine: ObservableObject {
         log("✨ Sweeping Rainbow Wave Hardware LED Refresh...")
 
         Task { @MainActor in
-            let rainbowVelocities: [UInt8] = [5, 14, 24, 38, 52, 68, 84, 98, 112, 122, 127]
+            let rainbowVelocities: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
             let totalSteps = 22
             for step in 0..<totalSteps {
                 for k in 0..<49 {
@@ -1262,7 +3396,7 @@ final class BitchBoyEngine: ObservableObject {
 
     // 2. Continuous 11-Column Rainbow Wave (Loops forever until stopped)
     private func startContinuousRainbowFX() {
-        let rainbowVelocities: [UInt8] = [5, 14, 24, 38, 52, 68, 84, 98, 112, 122, 127]
+        let rainbowVelocities: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
         var step = 0
         let interval = 0.07 / max(0.2, fxSpeed)
         fxTimer = Timer.publish(every: interval, on: .main, in: .common)
@@ -1292,7 +3426,7 @@ final class BitchBoyEngine: ObservableObject {
                 for k in 0..<49 {
                     let col = BitchBoyKeyMap.keyPositions[k].col
                     let dist = abs(col - activeCol)
-                    let vel: UInt8 = dist == 0 ? 127 : (dist == 1 ? 55 : (dist == 2 ? 18 : 0))
+                    let vel: UInt8 = dist == 0 ? 72 : (dist == 1 ? 61 : (dist == 2 ? 83 : 0))
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
                 }
@@ -1312,7 +3446,7 @@ final class BitchBoyEngine: ObservableObject {
                     let col = BitchBoyKeyMap.keyPositions[k].col
                     let row = BitchBoyKeyMap.keyPositions[k].row
                     let dropRow = (step + col * 3) % 7
-                    let vel: UInt8 = (row == dropRow) ? 127 : (row == (dropRow - 1 + 7) % 7 ? 60 : (row == (dropRow - 2 + 7) % 7 ? 22 : 0))
+                    let vel: UInt8 = (row == dropRow) ? 3 : (row == (dropRow - 1 + 7) % 7 ? 87 : (row == (dropRow - 2 + 7) % 7 ? 33 : 0))
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
                 }
@@ -1355,7 +3489,7 @@ final class BitchBoyEngine: ObservableObject {
             let faderVal = Double(controls[49 + col].liveValue)
             let colKeyIndices = [32 + col, 24 + col, 16 + col, 8 + col, 0 + col]
             let thresholds: [Double] = [15, 40, 65, 90, 115]
-            let colors: [UInt8] = [45, 55, 75, 100, 127]
+            let colors: [UInt8] = [87, 87, 74, 61, 72]
             for seg in 0..<5 {
                 let kIdx = colKeyIndices[seg]
                 let isLit = faderVal >= thresholds[seg]
@@ -1378,15 +3512,15 @@ final class BitchBoyEngine: ObservableObject {
     // 7. Fire & Embers (Organic flame simulation with flickering coals)
     private func startFireEmbersFX() {
         let interval = 0.08 / max(0.2, fxSpeed)
+        let firePal: [UInt8] = [0, 83, 72, 61, 96, 74, 3]
         fxTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 for k in 0..<49 {
                     let row = BitchBoyKeyMap.keyPositions[k].row
-                    let baseHeat = max(0, 5 - row) * 22
-                    let flicker = Int.random(in: -18...18)
-                    let vel = UInt8(max(0, min(127, baseHeat + flicker)))
+                    let heatIdx = min(firePal.count - 1, max(0, (4 - row) + Int.random(in: -1...1)))
+                    let vel = firePal[heatIdx]
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
                 }
@@ -1397,6 +3531,7 @@ final class BitchBoyEngine: ObservableObject {
     private func startWaterRippleFX() {
         var phase: Double = 0
         let interval = 0.05 / max(0.2, fxSpeed)
+        let waterPal: [UInt8] = [0, 41, 33, 78, 3]
         fxTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -1409,7 +3544,9 @@ final class BitchBoyEngine: ObservableObject {
                     let row = Double(BitchBoyKeyMap.keyPositions[k].row)
                     let dist = sqrt(pow(col - centerCol, 2) + pow(row - centerRow, 2))
                     let wave = sin(dist * 1.6 - phase)
-                    let vel = UInt8(max(0.0, wave) * 127.0)
+                    let norm = max(0.0, wave)
+                    let pIdx = Int(norm * Double(waterPal.count - 1))
+                    let vel = waterPal[min(waterPal.count - 1, max(0, pIdx))]
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
                 }
@@ -1433,7 +3570,7 @@ final class BitchBoyEngine: ObservableObject {
                 }
                 for _ in 0..<Int.random(in: 2...4) {
                     let rIdx = Int.random(in: 0..<49)
-                    starBrightness[rIdx] = UInt8.random(in: 90...127)
+                    starBrightness[rIdx] = [3, 78, 33, 41, 74, 95].randomElement() ?? 3
                 }
                 for k in 0..<49 {
                     let vel = starBrightness[k]
@@ -1452,7 +3589,7 @@ final class BitchBoyEngine: ObservableObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 count += 1
-                let vel: UInt8 = (count % 3 == 0) ? 127 : 0
+                let vel: UInt8 = (count % 3 == 0) ? 3 : 0
                 for k in 0..<49 {
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
@@ -1471,12 +3608,12 @@ final class BitchBoyEngine: ObservableObject {
                 step = (step + 1) % 24
                 let vel: UInt8
                 switch step {
-                case 0: vel = 127 // Lub
-                case 1: vel = 80
-                case 2: vel = 20
-                case 4: vel = 110 // Dub
-                case 5: vel = 60
-                case 6: vel = 10
+                case 0: vel = 72 // Lub (Red)
+                case 1: vel = 61 // (Orange)
+                case 2: vel = 83 // (Brown/dim)
+                case 4: vel = 72 // Dub (Red)
+                case 5: vel = 61 // (Orange)
+                case 6: vel = 83 // (Brown/dim)
                 default: vel = 0 // Pause
                 }
                 for k in 0..<49 {
@@ -1490,6 +3627,7 @@ final class BitchBoyEngine: ObservableObject {
     private func startPlasmaWaveFX() {
         var t: Double = 0
         let interval = 0.06 / max(0.2, fxSpeed)
+        let plasmaPal: [UInt8] = [41, 67, 95, 78, 33, 87, 74, 61, 72]
         fxTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -1502,7 +3640,8 @@ final class BitchBoyEngine: ObservableObject {
                     let v2 = cos(r * 0.8 + t * 0.9)
                     let v3 = sin((c + r) * 0.5 + t * 1.1)
                     let norm = (v1 + v2 + v3 + 3.0) / 6.0
-                    let vel = UInt8(norm * 127.0)
+                    let pIdx = Int(norm * Double(plasmaPal.count - 1))
+                    let vel = plasmaPal[min(plasmaPal.count - 1, max(0, pIdx))]
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
                 }
@@ -1513,6 +3652,7 @@ final class BitchBoyEngine: ObservableObject {
     private func startSpiralVortexFX() {
         var angle: Double = 0
         let interval = 0.06 / max(0.2, fxSpeed)
+        let vortexPal: [UInt8] = [0, 41, 67, 78, 33, 3]
         fxTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -1525,7 +3665,9 @@ final class BitchBoyEngine: ObservableObject {
                     let dy = Double(BitchBoyKeyMap.keyPositions[k].row) - centerRow
                     let keyAngle = atan2(dy, dx)
                     let diff = fmod(keyAngle - angle + .pi * 4, .pi * 2)
-                    let vel = UInt8(max(0.0, 1.0 - diff / (.pi * 2)) * 127.0)
+                    let norm = max(0.0, 1.0 - diff / (.pi * 2))
+                    let pIdx = Int(norm * Double(vortexPal.count - 1))
+                    let vel = vortexPal[min(vortexPal.count - 1, max(0, pIdx))]
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
                 }
@@ -1565,6 +3707,7 @@ final class BitchBoyEngine: ObservableObject {
     // 15. Color Runner (Snake head chasing with fading tail)
     private func startColorChaseFX() {
         var head = 0
+        let trailColors: [UInt8] = [3, 78, 87, 74, 61, 72, 95]
         let interval = 0.05 / max(0.2, fxSpeed)
         fxTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
@@ -1573,7 +3716,7 @@ final class BitchBoyEngine: ObservableObject {
                 head = (head + 1) % 49
                 for k in 0..<49 {
                     let dist = (head - k + 49) % 49
-                    let vel: UInt8 = dist < 7 ? UInt8((7 - dist) * 18) : 0
+                    let vel: UInt8 = dist < trailColors.count ? trailColors[dist] : 0
                     self.controls[k].currentLED = vel
                     self.sendNoteOn(note: self.controls[k].number, velocity: vel)
                 }
@@ -1709,34 +3852,58 @@ final class BitchBoyEngine: ObservableObject {
                 lastStreamMessage = "[\(controls[idx].label)] ON #\(data1) V:\(data2)"
                 SoundEffect.keyTap.play(with: soundPack)
 
-                switch controls[idx].feedbackMode {
-                case .momentary:
-                    controls[idx].currentLED = controls[idx].activeVelocity
-                    sendNoteOn(note: data1, velocity: controls[idx].activeVelocity)
-                case .toggle:
-                    controls[idx].toggleLatched.toggle()
-                    let v = controls[idx].toggleLatched ? controls[idx].activeVelocity : controls[idx].idleVelocity
-                    controls[idx].currentLED = v
-                    sendNoteOn(note: data1, velocity: v)
-                case .staticLED:
-                    controls[idx].currentLED = controls[idx].idleVelocity
-                    sendNoteOn(note: data1, velocity: controls[idx].idleVelocity)
+                if hardwareFeedbackEnabled {
+                    switch controls[idx].feedbackMode {
+                    case .momentary:
+                        controls[idx].currentLED = controls[idx].activeVelocity
+                        sendNoteOn(note: data1, velocity: controls[idx].activeVelocity)
+                    case .toggle:
+                        controls[idx].toggleLatched.toggle()
+                        let v = controls[idx].toggleLatched ? controls[idx].activeVelocity : controls[idx].idleVelocity
+                        controls[idx].currentLED = v
+                        sendNoteOn(note: data1, velocity: v)
+                    case .staticLED:
+                        controls[idx].currentLED = controls[idx].idleVelocity
+                        sendNoteOn(note: data1, velocity: controls[idx].idleVelocity)
+                    case .customVelocity:
+                        let v = controls[idx].feedbackCustomVelocity
+                        controls[idx].currentLED = v
+                        sendNoteOn(note: data1, velocity: v)
+                    case .echoInbound:
+                        let echoVel = BitchBoyHardwareColor.closestHardwareVelocity(for: data2)
+                        controls[idx].currentLED = echoVel
+                        sendNoteOn(note: data1, velocity: echoVel)
+                    case .disabled:
+                        break
+                    }
                 }
 
                 executeAction(for: controls[idx])
                 if idx < 49 {
                     triggerReactiveKeyFX(at: idx)
                 }
+                sendOSCForControl(index: idx, isPress: true, liveVal: data2)
             } else if isNoteOff {
                 controls[idx].isPressed = false
                 lastStreamMessage = "[\(controls[idx].label)] OFF #\(data1) V:0"
-                if activeReactivePulses.isEmpty {
-                    let restoreVel: UInt8 = (controls[idx].feedbackMode == .toggle && controls[idx].toggleLatched) ? controls[idx].activeVelocity : controls[idx].idleVelocity
+                sendOSCForControl(index: idx, isPress: false, liveVal: 0)
+                if hardwareFeedbackEnabled && activeReactivePulses.isEmpty {
+                    let restoreVel: UInt8
+                    switch controls[idx].feedbackMode {
+                    case .toggle:
+                        restoreVel = controls[idx].toggleLatched ? controls[idx].activeVelocity : controls[idx].idleVelocity
+                    case .disabled:
+                        restoreVel = controls[idx].currentLED
+                    default:
+                        restoreVel = controls[idx].idleVelocity
+                    }
                     controls[idx].currentLED = restoreVel
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 15_000_000)
-                        if self.activeReactivePulses.isEmpty {
-                            self.sendNoteOn(note: data1, velocity: restoreVel)
+                    if controls[idx].feedbackMode != .disabled {
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 15_000_000)
+                            if self.activeReactivePulses.isEmpty {
+                                self.sendNoteOn(note: data1, velocity: restoreVel)
+                            }
                         }
                     }
                 }
@@ -1747,6 +3914,12 @@ final class BitchBoyEngine: ObservableObject {
             if currentFXMode == .vuMeter && idx >= 49 && idx < 57 {
                 updateVUMeterFaders()
             }
+            if artNetMirrorHardwareFaders && idx >= 49 && idx < 57 {
+                let fIdx = idx - 49
+                artNetChannels[fIdx] = UInt8(min(255.0, max(0.0, Double(data2) / 127.0 * 255.0 * grandMasterLevel)))
+                sendArtNetDMX(host: artNetHost, universe: artNetUniverse, channels: artNetChannels)
+            }
+            sendOSCForControl(index: idx, isPress: true, liveVal: data2)
         }
     }
 
@@ -1886,8 +4059,52 @@ final class BitchBoyEngine: ObservableObject {
     // ------------------------------------------------------------------------
     // UI SCALING / ZOOM & CUSTOM APP ICON ENGINE
     // ------------------------------------------------------------------------
+    // CONSOLE DIMENSIONS & ASPECT-RATIO ENGINE
+    // ------------------------------------------------------------------------
     static let consoleBaseWidth: CGFloat = 1566
-    static let consoleBaseHeight: CGFloat = 780
+    static let consoleBaseHeight: CGFloat = 840
+
+    var leftWingContentHeight: CGFloat {
+        guard !leftWingModules.isEmpty || isRearrangingModules else { return 0 }
+        let modsH = leftWingModules.reduce(CGFloat(0)) { $0 + (moduleCustomHeights[$1] ?? $1.defaultSlotHeight) + 10 }
+        return modsH + (isRearrangingModules ? 60 : 0)
+    }
+
+    var rightWingContentHeight: CGFloat {
+        guard !rightWingModules.isEmpty || isRearrangingModules else { return 0 }
+        let modsH = rightWingModules.reduce(CGFloat(0)) { $0 + (moduleCustomHeights[$1] ?? $1.defaultSlotHeight) + 10 }
+        return modsH + (isRearrangingModules ? 60 : 0)
+    }
+
+    var centerDeckHeight: CGFloat {
+        530
+    }
+
+    var bottomRackContentHeight: CGFloat {
+        guard !bottomRackModules.isEmpty || isRearrangingModules else { return 0 }
+        let maxRackH = bottomRackModules.map { moduleCustomHeights[$0] ?? $0.defaultSlotHeight }.max() ?? 240
+        return maxRackH + 52
+    }
+
+    var centerTotalHeight: CGFloat {
+        centerDeckHeight + bottomRackContentHeight
+    }
+
+    // Exact physical content height of the faceplate columns (encompassing all wings, deck, and bottom expansion rack)
+    var chassisContentHeight: CGFloat {
+        let maxColumnH = max(centerTotalHeight, max(leftWingContentHeight, rightWingContentHeight))
+        return max(530, maxColumnH)
+    }
+
+    var effectiveConsoleHeight: CGFloat {
+        let faceplateTotalH = chassisContentHeight + 36 // 18px top & 18px bottom padding inside chassis
+        let totalWindowH = faceplateTotalH + 50 + 12 + 28 // Top nav (50) + spacing (12) + outer window vertical padding (28)
+        return totalWindowH
+    }
+
+    var wingMaxHeight: CGFloat {
+        chassisContentHeight
+    }
 
     func loadUISettingsAndAppIcon() {
         // Always set the live macOS Dock / Application icon to our BitchBoyBadgeIcon / AppIcon artwork
@@ -1907,6 +4124,29 @@ final class BitchBoyEngine: ObservableObject {
         if UserDefaults.standard.object(forKey: alwaysOnTopStorageKey) != nil {
             isWindowAlwaysOnTop = UserDefaults.standard.bool(forKey: alwaysOnTopStorageKey)
         }
+
+        // Load custom glow themes
+        if let themeData = UserDefaults.standard.data(forKey: customThemesStorageKey),
+           let decoded = try? JSONDecoder().decode([CustomChassisTheme].self, from: themeData),
+           !decoded.isEmpty {
+            self.customThemes = decoded
+        } else {
+            self.customThemes = CustomChassisTheme.starterThemes()
+        }
+
+        if let savedThemeID = UserDefaults.standard.string(forKey: activeCustomThemeIdStorageKey),
+           let match = customThemes.first(where: { $0.id.uuidString == savedThemeID }) {
+            self.activeCustomTheme = match
+        } else {
+            self.activeCustomTheme = customThemes[0]
+        }
+        Self.activeCustomThemeStatic = self.activeCustomTheme
+
+        if let savedThemeName = UserDefaults.standard.string(forKey: themeStorageKey),
+           let savedTh = ChassisTheme(rawValue: savedThemeName) {
+            self.currentTheme = savedTh
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             self.applyWindowAlwaysOnTop()
         }
@@ -1925,30 +4165,917 @@ final class BitchBoyEngine: ObservableObject {
             NSApplication.shared.applicationIconImage = badgeIcon
         }
         let minW = Self.consoleBaseWidth * 0.15
-        let minH = Self.consoleBaseHeight * 0.15
+        let minH = effectiveConsoleHeight * 0.15
+        let detachedWinSet = Set(moduleWindows.values)
+        for (mod, win) in moduleWindows {
+            win.level = isModuleWindowTopMost(mod) ? .floating : .normal
+        }
         for window in NSApplication.shared.windows {
+            if detachedWinSet.contains(window) {
+                continue
+            }
             let className = String(describing: type(of: window))
             if className.contains("StatusBar") || className.contains("Menu") { continue }
             window.title = "BitchManager"
             window.level = isWindowAlwaysOnTop ? .floating : .normal
             window.contentMinSize = NSSize(width: minW, height: minH)
-            window.contentAspectRatio = NSSize(width: Self.consoleBaseWidth, height: Self.consoleBaseHeight)
+            window.contentAspectRatio = NSSize(width: Self.consoleBaseWidth, height: effectiveConsoleHeight)
         }
+    }
+
+    func isModuleWindowTopMost(_ module: StudioModuleID) -> Bool {
+        pinnedModuleWindows.contains(module) || isWindowAlwaysOnTop
+    }
+
+    func toggleModuleWindowTopMost(_ module: StudioModuleID) {
+        if pinnedModuleWindows.contains(module) {
+            pinnedModuleWindows.remove(module)
+        } else {
+            pinnedModuleWindows.insert(module)
+        }
+        if let win = moduleWindows[module] {
+            win.level = isModuleWindowTopMost(module) ? .floating : .normal
+        }
+        SoundEffect.knobTick.play(with: soundPack)
+    }
+
+    // ------------------------------------------------------------------------
+    // CUSTOM CHASSIS THEME SYSTEM METHODS
+    // ------------------------------------------------------------------------
+    func applyCustomTheme(_ theme: CustomChassisTheme) {
+        activeCustomTheme = theme
+        Self.activeCustomThemeStatic = theme
+        currentTheme = .customUser
+        UserDefaults.standard.set(theme.id.uuidString, forKey: activeCustomThemeIdStorageKey)
+        UserDefaults.standard.set(currentTheme.rawValue, forKey: themeStorageKey)
+        SoundEffect.presetSwitch.play(with: soundPack)
+        log("🎨 Applied Custom Theme: '\(theme.name)'")
+    }
+
+    func saveAndApplyActiveCustomTheme() {
+        if let idx = customThemes.firstIndex(where: { $0.id == activeCustomTheme.id }) {
+            customThemes[idx] = activeCustomTheme
+        } else {
+            customThemes.append(activeCustomTheme)
+        }
+        if let encoded = try? JSONEncoder().encode(customThemes) {
+            UserDefaults.standard.set(encoded, forKey: customThemesStorageKey)
+        }
+        Self.activeCustomThemeStatic = activeCustomTheme
+        if currentTheme == .customUser {
+            currentTheme = .customUser
+        }
+    }
+
+    func createNewCustomTheme() {
+        var newTheme = CustomChassisTheme.defaultCustom()
+        newTheme.id = UUID()
+        newTheme.name = "CUSTOM THEME #\(customThemes.count + 1)"
+        customThemes.append(newTheme)
+        if let encoded = try? JSONEncoder().encode(customThemes) {
+            UserDefaults.standard.set(encoded, forKey: customThemesStorageKey)
+        }
+        applyCustomTheme(newTheme)
+    }
+
+    func duplicateActiveCustomTheme() {
+        var copy = activeCustomTheme
+        copy.id = UUID()
+        copy.name = "\(activeCustomTheme.name) (COPY)"
+        customThemes.append(copy)
+        if let encoded = try? JSONEncoder().encode(customThemes) {
+            UserDefaults.standard.set(encoded, forKey: customThemesStorageKey)
+        }
+        applyCustomTheme(copy)
+    }
+
+    func deleteActiveCustomTheme() {
+        let doomedID = activeCustomTheme.id
+        customThemes.removeAll { $0.id == doomedID }
+        if customThemes.isEmpty {
+            customThemes = CustomChassisTheme.starterThemes()
+        }
+        if let encoded = try? JSONEncoder().encode(customThemes) {
+            UserDefaults.standard.set(encoded, forKey: customThemesStorageKey)
+        }
+        applyCustomTheme(customThemes[0])
+    }
+
+    func updateCustomThemeName(_ name: String) {
+        activeCustomTheme.name = name
+        saveAndApplyActiveCustomTheme()
+    }
+
+    func updateCustomThemeColor<T>(key: WritableKeyPath<CustomChassisTheme, T>, value: T) {
+        activeCustomTheme[keyPath: key] = value
+        saveAndApplyActiveCustomTheme()
+    }
+
+    enum StarterPresetType {
+        case neoTokyo, acidLime, inferno, deepIce
+    }
+
+    func loadPresetToActiveTheme(_ preset: StarterPresetType) {
+        let starters = CustomChassisTheme.starterThemes()
+        let template: CustomChassisTheme
+        switch preset {
+        case .neoTokyo: template = starters[0]
+        case .acidLime: template = starters[1]
+        case .inferno: template = starters[2]
+        case .deepIce: template = starters[3]
+        }
+        activeCustomTheme.pcbHex = template.pcbHex
+        activeCustomTheme.bezelStartHex = template.bezelStartHex
+        activeCustomTheme.bezelEndHex = template.bezelEndHex
+        activeCustomTheme.accentGlowHex = template.accentGlowHex
+        activeCustomTheme.outlineHex = template.outlineHex
+        activeCustomTheme.headerTextHex = template.headerTextHex
+        saveAndApplyActiveCustomTheme()
+        SoundEffect.presetSwitch.play(with: soundPack)
+    }
+
+    // ------------------------------------------------------------------------
+    // GITHUB AUTO-UPDATER ENGINE
+    // ------------------------------------------------------------------------
+    static func isVersion(_ candidate: String, newerThan current: String) -> Bool {
+        let cleanCandidate = candidate.trimmingCharacters(in: CharacterSet(charactersIn: "vV \t\r\n"))
+        let cleanCurrent = current.trimmingCharacters(in: CharacterSet(charactersIn: "vV \t\r\n"))
+        let candParts = cleanCandidate.split(separator: ".").compactMap { Int($0) }
+        let currParts = cleanCurrent.split(separator: ".").compactMap { Int($0) }
+        let maxLen = max(candParts.count, currParts.count)
+        for i in 0..<maxLen {
+            let c = i < candParts.count ? candParts[i] : 0
+            let cur = i < currParts.count ? currParts[i] : 0
+            if c > cur { return true }
+            if c < cur { return false }
+        }
+        return false
+    }
+
+    func checkForUpdates(silent: Bool = false, showModalIfCurrent: Bool = false) {
+        guard !isCheckingForUpdates else { return }
+        isCheckingForUpdates = true
+        updateError = nil
+
+        let urlString = "https://api.github.com/repos/kookly/BitchManager/releases/latest"
+        guard let url = URL(string: urlString) else {
+            isCheckingForUpdates = false
+            return
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("BitchManagerApp/\(currentAppVersion)", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 10.0
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isCheckingForUpdates = false
+                self.lastUpdateCheckDate = Date()
+
+                if let error = error {
+                    if !silent {
+                        let nsErr = error as NSError
+                        let errDetail: String
+                        if nsErr.code == NSURLErrorCannotFindHost || nsErr.code == NSURLErrorNotConnectedToInternet {
+                            errDetail = "Network unreachable or sandbox blocked. (Rebuild the project in Xcode so the outgoing network entitlement is loaded)."
+                        } else {
+                            errDetail = error.localizedDescription
+                        }
+                        self.updateError = "Network notice: \(errDetail)"
+                        self.updateCheckResultNotice = "GitHub check: \(errDetail)"
+                        self.showUpToDateNotice = true
+                    }
+                    return
+                }
+
+                guard let httpResp = response as? HTTPURLResponse else {
+                    if !silent {
+                        self.updateCheckResultNotice = "Invalid server response from GitHub."
+                        self.showUpToDateNotice = true
+                    }
+                    return
+                }
+
+                if httpResp.statusCode == 404 {
+                    self.updateAvailable = false
+                    if showModalIfCurrent || !silent {
+                        self.updateCheckResultNotice = "Connected to GitHub! You're on v\(self.currentAppVersion). No release published yet on kookly/BitchManager."
+                        self.showUpToDateNotice = true
+                    }
+                    return
+                }
+
+                guard httpResp.statusCode == 200, let data = data else {
+                    if !silent {
+                        self.updateCheckResultNotice = "GitHub returned status code \(httpResp.statusCode)."
+                        self.showUpToDateNotice = true
+                    }
+                    return
+                }
+
+                do {
+                    let release = try JSONDecoder().decode(GitHubReleaseInfo.self, from: data)
+                    let isNewer = Self.isVersion(release.tagName, newerThan: self.currentAppVersion)
+                    self.latestRelease = release
+
+                    if isNewer {
+                        self.updateAvailable = true
+                        self.showUpdateModal = true
+                        SoundEffect.hardwareConnected.play(with: self.soundPack)
+                    } else {
+                        self.updateAvailable = false
+                        if showModalIfCurrent || !silent {
+                            self.updateCheckResultNotice = "BitchManager v\(self.currentAppVersion) is currently the latest version!"
+                            self.showUpToDateNotice = true
+                        }
+                    }
+                } catch {
+                    if !silent {
+                        self.updateCheckResultNotice = "Failed to parse GitHub release info."
+                        self.showUpToDateNotice = true
+                    }
+                }
+            }
+        }.resume()
+    }
+
+    func simulateGitHubUpdateForTesting() {
+        let simulated = GitHubReleaseInfo(
+            id: 999999,
+            tagName: "v2.0.0",
+            name: "BitchManager v2.0.0 // Next-Gen Cyber Release",
+            body: """
+            ### 🚀 BitchManager v2.0.0 Release Notes
+
+            - **Custom Cyber Chassis Themes**: Built-in Theme Studio with full 6-point glow color palette.
+            - **Custom Sound Bank**: Upload custom .WAV, .MP3, and .AIFF audio for any hardware or app action.
+            - **Center Spotlight & Module Rearrange**: Pop out windows, center modules, and iOS-style jiggle rearrangement.
+            - **Tailored Floating Windows**: Aspect-ratio locked, non-clipping, and pin to top-most window level.
+            - **Automatic GitHub Updates**: In-app one-click update detection and background installation!
+            """,
+            htmlUrl: "https://github.com/kookly/BitchManager/releases",
+            publishedAt: "2026-10-24T12:00:00Z",
+            assets: [
+                GitHubReleaseAsset(
+                    id: 101,
+                    name: "BitchManager.zip",
+                    browserDownloadUrl: "https://github.com/kookly/BitchManager/releases",
+                    size: 14_850_000,
+                    contentType: "application/zip"
+                )
+            ]
+        )
+        self.latestRelease = simulated
+        self.updateAvailable = true
+        self.showUpdateModal = true
+        SoundEffect.hardwareConnected.play(with: soundPack)
+    }
+
+    func cancelUpdateDownload() {
+        activeDownloadTask?.cancel()
+        activeDownloadTask = nil
+        isDownloadingUpdate = false
+        updateStatusMessage = ""
+        updateDownloadProgress = 0.0
+    }
+
+    func installUpdateFromGitHub() {
+        guard let release = latestRelease else { return }
+
+        // Simulated test release mode: smoothly demonstrate progress UI
+        if release.id == 999999 {
+            isDownloadingUpdate = true
+            updateError = nil
+            updateDownloadProgress = 0.05
+            updateStatusMessage = "Testing update UI: Simulating package download..."
+
+            Task { @MainActor [weak self] in
+                for step in 1...10 {
+                    try? await Task.sleep(nanoseconds: 220_000_000)
+                    guard let self = self, self.isDownloadingUpdate else { break }
+                    self.updateDownloadProgress = min(1.0, Double(step) * 0.12)
+                    if step < 5 {
+                        self.updateStatusMessage = "Simulating download of BitchManager.zip (\(Int(self.updateDownloadProgress * 100))%)..."
+                    } else if step < 8 {
+                        self.updateStatusMessage = "Simulating package extraction & quarantine clearance..."
+                    } else {
+                        self.updateDownloadProgress = 1.0
+                        self.updateStatusMessage = "Simulation complete! Real GitHub update will auto-restart the app."
+                        try? await Task.sleep(nanoseconds: 1_600_000_000)
+                        self.isDownloadingUpdate = false
+                        self.showUpdateModal = false
+                        self.updateCheckResultNotice = "Update simulation completed successfully!"
+                        self.showUpToDateNotice = true
+                        break
+                    }
+                }
+            }
+            return
+        }
+
+        guard let asset = release.bestAsset, let assetUrl = URL(string: asset.browserDownloadUrl), assetUrl.scheme?.hasPrefix("http") == true else {
+            if let webUrl = URL(string: release.htmlUrl) {
+                NSWorkspace.shared.open(webUrl)
+            }
+            return
+        }
+
+        isDownloadingUpdate = true
+        updateError = nil
+        updateDownloadProgress = 0.05
+        updateStatusMessage = "Connecting to GitHub & downloading \(asset.name)..."
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("BitchManager_Update_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+
+        let sessionConfig = URLSessionConfiguration.default
+        let session = URLSession(configuration: sessionConfig)
+
+        let task = session.downloadTask(with: assetUrl) { [weak self] localURL, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+
+                if let error = error {
+                    self.isDownloadingUpdate = false
+                    self.updateError = "Download failed: \(error.localizedDescription)"
+                    self.updateStatusMessage = ""
+                    return
+                }
+
+                guard let localURL = localURL else {
+                    self.isDownloadingUpdate = false
+                    self.updateError = "Downloaded file could not be saved."
+                    self.updateStatusMessage = ""
+                    return
+                }
+
+                self.updateDownloadProgress = 0.70
+                self.updateStatusMessage = "Extracting update package..."
+
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let fileExt = (asset.name as NSString).pathExtension.lowercased()
+                    let targetAppPath = Bundle.main.bundleURL.path
+                    let extractedDir = tempBase.appendingPathComponent("Extracted")
+                    try? FileManager.default.createDirectory(at: extractedDir, withIntermediateDirectories: true)
+
+                    let archiveDest = tempBase.appendingPathComponent(asset.name)
+                    try? FileManager.default.removeItem(at: archiveDest)
+                    try? FileManager.default.moveItem(at: localURL, to: archiveDest)
+
+                    var newAppBundleURL: URL? = nil
+
+                    if fileExt == "zip" {
+                        let dittoProc = Process()
+                        dittoProc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                        dittoProc.arguments = ["-xk", archiveDest.path, extractedDir.path]
+                        try? dittoProc.run()
+                        dittoProc.waitUntilExit()
+
+                        if let enumerator = FileManager.default.enumerator(at: extractedDir, includingPropertiesForKeys: nil) {
+                            for case let fileURL as URL in enumerator {
+                                if fileURL.pathExtension == "app" {
+                                    newAppBundleURL = fileURL
+                                    break
+                                }
+                            }
+                        }
+                    } else if fileExt == "dmg" {
+                        let mountPoint = tempBase.appendingPathComponent("DMGMount")
+                        try? FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
+
+                        let hdiProc = Process()
+                        hdiProc.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                        hdiProc.arguments = ["attach", archiveDest.path, "-mountpoint", mountPoint.path, "-nobrowse", "-quiet", "-readonly"]
+                        try? hdiProc.run()
+                        hdiProc.waitUntilExit()
+
+                        if let enumerator = FileManager.default.enumerator(at: mountPoint, includingPropertiesForKeys: nil) {
+                            for case let fileURL as URL in enumerator {
+                                if fileURL.pathExtension == "app" {
+                                    let copyDest = extractedDir.appendingPathComponent(fileURL.lastPathComponent)
+                                    try? FileManager.default.copyItem(at: fileURL, to: copyDest)
+                                    newAppBundleURL = copyDest
+                                    break
+                                }
+                            }
+                        }
+
+                        let detachProc = Process()
+                        detachProc.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                        detachProc.arguments = ["detach", mountPoint.path, "-quiet", "-force"]
+                        try? detachProc.run()
+                        detachProc.waitUntilExit()
+                    }
+
+                    DispatchQueue.main.async {
+                        guard let newAppURL = newAppBundleURL else {
+                            self.isDownloadingUpdate = false
+                            if let webUrl = URL(string: release.htmlUrl) {
+                                NSWorkspace.shared.open(webUrl)
+                            }
+                            self.updateError = "The release asset did not contain an installable BitchManager.app. Opening GitHub release page."
+                            return
+                        }
+
+                        self.updateDownloadProgress = 0.95
+                        self.updateStatusMessage = "Installing update & relaunching BitchManager..."
+
+                        let scriptPath = tempBase.appendingPathComponent("bitchmanager_update.sh")
+                        let currentPID = ProcessInfo.processInfo.processIdentifier
+
+                        let scriptContent = """
+                        #!/bin/bash
+                        # Wait for current BitchManager instance to exit
+                        for i in {1..30}; do
+                            if ! ps -p \(currentPID) > /dev/null 2>&1; then
+                                break
+                            fi
+                            sleep 0.2
+                        done
+
+                        # Strip quarantine attribute
+                        xattr -dr com.apple.quarantine "\(newAppURL.path)" 2>/dev/null || true
+
+                        # Replace existing app bundle
+                        rm -rf "\(targetAppPath)"
+                        cp -R "\(newAppURL.path)" "\(targetAppPath)"
+                        xattr -dr com.apple.quarantine "\(targetAppPath)" 2>/dev/null || true
+
+                        # Launch updated app
+                        open -n -a "\(targetAppPath)"
+
+                        # Clean up temp
+                        sleep 2
+                        rm -rf "\(tempBase.path)"
+                        exit 0
+                        """
+
+                        try? scriptContent.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+                        let chmodProc = Process()
+                        chmodProc.executableURL = URL(fileURLWithPath: "/bin/chmod")
+                        chmodProc.arguments = ["+x", scriptPath.path]
+                        try? chmodProc.run()
+                        chmodProc.waitUntilExit()
+
+                        let launchProc = Process()
+                        launchProc.executableURL = URL(fileURLWithPath: "/bin/bash")
+                        launchProc.arguments = [scriptPath.path]
+                        try? launchProc.run()
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            NSApplication.shared.terminate(nil)
+                        }
+                    }
+                }
+            }
+        }
+        activeDownloadTask = task
+        task.resume()
     }
 
     func resizeMainWindowToScale(_ scale: CGFloat) {
         let clamped = min(2.2, max(0.15, scale))
         let targetW = round(Self.consoleBaseWidth * clamped)
-        let targetH = round(Self.consoleBaseHeight * clamped)
+        let targetH = round(effectiveConsoleHeight * clamped)
         DispatchQueue.main.async {
+            let detachedWinSet = Set(self.moduleWindows.values)
             for window in NSApplication.shared.windows {
+                if detachedWinSet.contains(window) { continue }
                 let className = String(describing: type(of: window))
                 if className.contains("StatusBar") || className.contains("Menu") { continue }
-                window.contentMinSize = NSSize(width: Self.consoleBaseWidth * 0.15, height: Self.consoleBaseHeight * 0.15)
-                window.contentAspectRatio = NSSize(width: Self.consoleBaseWidth, height: Self.consoleBaseHeight)
+                window.contentMinSize = NSSize(width: Self.consoleBaseWidth * 0.15, height: self.effectiveConsoleHeight * 0.15)
+                window.contentAspectRatio = NSSize(width: Self.consoleBaseWidth, height: self.effectiveConsoleHeight)
                 window.setContentSize(NSSize(width: targetW, height: targetH))
             }
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // CUSTOM SOUND STUDIO & USER AUDIO UPLOAD ENGINE
+    // ------------------------------------------------------------------------
+    func loadModuleOrderAndSoundSettings() {
+        if let savedPackRaw = UserDefaults.standard.string(forKey: soundPackStorageKey),
+           let savedPack = SoundPack(rawValue: savedPackRaw) {
+            soundPack = savedPack
+        }
+
+        // Load Left Wing
+        if let data = UserDefaults.standard.data(forKey: leftWingStorageKey),
+           let decoded = try? JSONDecoder().decode([StudioModuleID].self, from: data) {
+            leftWingModules = decoded
+        } else {
+            leftWingModules = [.showControl, .memorySlots]
+        }
+
+        // Load Right Wing
+        if let data = UserDefaults.standard.data(forKey: rightWingStorageKey),
+           let decoded = try? JSONDecoder().decode([StudioModuleID].self, from: data) {
+            rightWingModules = decoded
+        } else {
+            rightWingModules = [.midiRouter, .customFXStudio]
+        }
+
+        // Load Bottom Rack
+        if let data = UserDefaults.standard.data(forKey: bottomRackStorageKey),
+           let decoded = try? JSONDecoder().decode([StudioModuleID].self, from: data) {
+            bottomRackModules = decoded
+        } else {
+            bottomRackModules = [.reactiveKeyFX]
+        }
+
+        // Ensure all 5 modules are accounted for without duplicates
+        var placed = Set(leftWingModules + rightWingModules + bottomRackModules)
+        for m in StudioModuleID.allCases where !placed.contains(m) {
+            bottomRackModules.append(m)
+            placed.insert(m)
+        }
+
+        // Load Custom Heights
+        if let hData = UserDefaults.standard.data(forKey: moduleHeightsStorageKey),
+           let decodedHeights = try? JSONDecoder().decode([String: Double].self, from: hData) {
+            for (key, val) in decodedHeights {
+                if let mod = StudioModuleID(rawValue: key) {
+                    moduleCustomHeights[mod] = CGFloat(val)
+                }
+            }
+        }
+
+        // Load Custom Widths
+        if let wData = UserDefaults.standard.data(forKey: moduleWidthsStorageKey),
+           let decodedWidths = try? JSONDecoder().decode([String: Double].self, from: wData) {
+            for (key, val) in decodedWidths {
+                if let mod = StudioModuleID(rawValue: key) {
+                    moduleCustomWidths[mod] = CGFloat(val)
+                }
+            }
+        }
+
+        moduleOrder = leftWingModules + rightWingModules + bottomRackModules
+    }
+
+    func setSoundPack(_ pack: SoundPack) {
+        soundPack = pack
+        UserDefaults.standard.set(pack.rawValue, forKey: soundPackStorageKey)
+        SoundEffect.presetSwitch.play(with: pack)
+    }
+
+    func uploadCustomSoundFile(for effect: SoundEffect) {
+        let panel = NSOpenPanel()
+        panel.title = "Select Custom Audio File for \(effect.displayName)"
+        panel.allowedContentTypes = [.audio, .mp3, .wav, .aiff]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            if let _ = CustomSoundBank.shared.setCustomSound(url: url, for: effect) {
+                soundPack = .customUser
+                UserDefaults.standard.set(soundPack.rawValue, forKey: soundPackStorageKey)
+                customSoundUpdateToken += 1
+                effect.play(with: .customUser)
+                log("🔊 Uploaded Custom Sound '\(url.lastPathComponent)' for \(effect.displayName)")
+            }
+        }
+    }
+
+    func clearCustomSoundFile(for effect: SoundEffect) {
+        CustomSoundBank.shared.clearCustomSound(for: effect)
+        customSoundUpdateToken += 1
+        SoundEffect.knobTick.play(with: soundPack)
+        log("🗑️ Cleared custom sound for \(effect.displayName)")
+    }
+
+    func clearAllCustomSoundFiles() {
+        CustomSoundBank.shared.clearAllCustomSounds()
+        customSoundUpdateToken += 1
+        SoundEffect.knobTick.play(with: soundPack)
+        log("🗑️ Reset all custom sounds to default")
+    }
+
+    // ------------------------------------------------------------------------
+    // MODULE DYNAMIC PLACEMENT, RESIZING, SPOTLIGHT & FLOATING WINDOWS
+    // ------------------------------------------------------------------------
+    func currentZone(of module: StudioModuleID) -> ModuleZone {
+        if detachedModules.contains(module) { return .floating }
+        if leftWingModules.contains(module) { return .leftWing }
+        if rightWingModules.contains(module) { return .rightWing }
+        if bottomRackModules.contains(module) { return .bottomRack }
+        return .leftWing
+    }
+
+    func moveModuleToZone(_ module: StudioModuleID, zone: ModuleZone, atIndex: Int? = nil) {
+        if spotlightModule == module {
+            withAnimation { spotlightModule = nil }
+        }
+        leftWingModules.removeAll(where: { $0 == module })
+        rightWingModules.removeAll(where: { $0 == module })
+        bottomRackModules.removeAll(where: { $0 == module })
+
+        switch zone {
+        case .floating:
+            popOutModuleToWindow(module)
+        case .leftWing:
+            detachedModules.remove(module)
+            dockModuleBackFromWindow(module)
+            let idx = min(atIndex ?? leftWingModules.count, leftWingModules.count)
+            leftWingModules.insert(module, at: idx)
+        case .rightWing:
+            detachedModules.remove(module)
+            dockModuleBackFromWindow(module)
+            let idx = min(atIndex ?? rightWingModules.count, rightWingModules.count)
+            rightWingModules.insert(module, at: idx)
+        case .bottomRack:
+            detachedModules.remove(module)
+            dockModuleBackFromWindow(module)
+            let idx = min(atIndex ?? bottomRackModules.count, bottomRackModules.count)
+            bottomRackModules.insert(module, at: idx)
+        }
+        moduleOrder = leftWingModules + rightWingModules + bottomRackModules
+        saveModuleLayout()
+        SoundEffect.keyTap.play(with: soundPack)
+        log("📍 Moved '\(module.shortName)' to \(zone.displayName)")
+    }
+
+    func moveModuleWithinZone(_ module: StudioModuleID, direction: Int) {
+        let zone = currentZone(of: module)
+        switch zone {
+        case .leftWing:
+            guard let idx = leftWingModules.firstIndex(of: module) else { return }
+            let newIdx = idx + direction
+            if newIdx >= 0 && newIdx < leftWingModules.count {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    leftWingModules.swapAt(idx, newIdx)
+                }
+                saveModuleLayout()
+                SoundEffect.keyTap.play(with: soundPack)
+            }
+        case .rightWing:
+            guard let idx = rightWingModules.firstIndex(of: module) else { return }
+            let newIdx = idx + direction
+            if newIdx >= 0 && newIdx < rightWingModules.count {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    rightWingModules.swapAt(idx, newIdx)
+                }
+                saveModuleLayout()
+                SoundEffect.keyTap.play(with: soundPack)
+            }
+        case .bottomRack:
+            guard let idx = bottomRackModules.firstIndex(of: module) else { return }
+            let newIdx = idx + direction
+            if newIdx >= 0 && newIdx < bottomRackModules.count {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    bottomRackModules.swapAt(idx, newIdx)
+                }
+                saveModuleLayout()
+                SoundEffect.keyTap.play(with: soundPack)
+            }
+        case .floating:
+            break
+        }
+        moduleOrder = leftWingModules + rightWingModules + bottomRackModules
+    }
+
+    func setModuleHeight(_ module: StudioModuleID, height: CGFloat, save: Bool = true) {
+        let clamped = max(160, min(650, height))
+        moduleCustomHeights[module] = clamped
+        if save {
+            saveModuleSizes()
+        }
+    }
+
+    func resetModuleHeight(_ module: StudioModuleID) {
+        moduleCustomHeights.removeValue(forKey: module)
+        saveModuleSizes()
+        SoundEffect.presetSwitch.play(with: soundPack)
+    }
+
+    func cycleModuleSizePreset(_ module: StudioModuleID) {
+        let currentH = moduleCustomHeights[module] ?? module.defaultSlotHeight
+        let nextH: CGFloat
+        if currentH < 240 {
+            nextH = 340
+        } else if currentH < 380 {
+            nextH = 480
+        } else if currentH < 520 {
+            nextH = 210
+        } else {
+            nextH = 340
+        }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+            moduleCustomHeights[module] = nextH
+        }
+        saveModuleSizes()
+        SoundEffect.knobTick.play(with: soundPack)
+    }
+
+    func moduleSizePresetLabel(_ module: StudioModuleID) -> String {
+        guard let h = moduleCustomHeights[module] else { return "AUTO" }
+        if h <= 230 { return "COMPACT" }
+        if h <= 360 { return "STD" }
+        return "TALL"
+    }
+
+    func toggleSpotlightModule(_ module: StudioModuleID) {
+        SoundEffect.presetSwitch.play(with: soundPack)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
+            if spotlightModule == module {
+                spotlightModule = nil
+            } else {
+                showCustomSoundStudio = false
+                spotlightModule = module
+            }
+        }
+    }
+
+    func toggleRearrangeModulesMode() {
+        SoundEffect.knobTick.play(with: soundPack)
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+            isRearrangingModules.toggle()
+        }
+        log(isRearrangingModules ? "📱 Module Placement & Dynamic Resizing Mode: ACTIVE" : "✅ Module Layout Locked")
+    }
+
+    func swapModules(_ first: StudioModuleID, _ second: StudioModuleID) {
+        guard first != second else { return }
+        let zone1 = currentZone(of: first)
+        let zone2 = currentZone(of: second)
+
+        if zone1 == zone2 {
+            switch zone1 {
+            case .leftWing:
+                guard let i1 = leftWingModules.firstIndex(of: first),
+                      let i2 = leftWingModules.firstIndex(of: second) else { return }
+                leftWingModules.swapAt(i1, i2)
+            case .rightWing:
+                guard let i1 = rightWingModules.firstIndex(of: first),
+                      let i2 = rightWingModules.firstIndex(of: second) else { return }
+                rightWingModules.swapAt(i1, i2)
+            case .bottomRack:
+                guard let i1 = bottomRackModules.firstIndex(of: first),
+                      let i2 = bottomRackModules.firstIndex(of: second) else { return }
+                bottomRackModules.swapAt(i1, i2)
+            case .floating:
+                break
+            }
+        } else {
+            moveModuleToZone(first, zone: zone2)
+        }
+        moduleOrder = leftWingModules + rightWingModules + bottomRackModules
+        saveModuleLayout()
+        SoundEffect.keyTap.play(with: soundPack)
+    }
+
+    func moveModule(_ module: StudioModuleID, toSlot slotIndex: Int) {
+        if slotIndex < 2 {
+            moveModuleToZone(module, zone: .leftWing, atIndex: slotIndex)
+        } else if slotIndex < 4 {
+            moveModuleToZone(module, zone: .rightWing, atIndex: slotIndex - 2)
+        } else {
+            moveModuleToZone(module, zone: .bottomRack, atIndex: slotIndex - 4)
+        }
+    }
+
+    func saveModuleLayout() {
+        if let lw = try? JSONEncoder().encode(leftWingModules) {
+            UserDefaults.standard.set(lw, forKey: leftWingStorageKey)
+        }
+        if let rw = try? JSONEncoder().encode(rightWingModules) {
+            UserDefaults.standard.set(rw, forKey: rightWingStorageKey)
+        }
+        if let br = try? JSONEncoder().encode(bottomRackModules) {
+            UserDefaults.standard.set(br, forKey: bottomRackStorageKey)
+        }
+        if let encoded = try? JSONEncoder().encode(moduleOrder) {
+            UserDefaults.standard.set(encoded, forKey: moduleOrderStorageKey)
+        }
+    }
+
+    func saveModuleSizes() {
+        let rawHeights = moduleCustomHeights.reduce(into: [String: Double]()) { dict, pair in
+            dict[pair.key.rawValue] = Double(pair.value)
+        }
+        if let data = try? JSONEncoder().encode(rawHeights) {
+            UserDefaults.standard.set(data, forKey: moduleHeightsStorageKey)
+        }
+        let rawWidths = moduleCustomWidths.reduce(into: [String: Double]()) { dict, pair in
+            dict[pair.key.rawValue] = Double(pair.value)
+        }
+        if let data = try? JSONEncoder().encode(rawWidths) {
+            UserDefaults.standard.set(data, forKey: moduleWidthsStorageKey)
+        }
+    }
+
+    func setModuleWidth(_ module: StudioModuleID, width: CGFloat, save: Bool = true) {
+        let clamped = max(260, min(894, width))
+        moduleCustomWidths[module] = clamped
+        if save {
+            saveModuleSizes()
+        }
+    }
+
+    func cycleModuleWidthPreset(_ module: StudioModuleID) {
+        let currentW = moduleCustomWidths[module] ?? 435
+        let nextW: CGFloat
+        if currentW < 360 {
+            nextW = 435 // Half rack
+        } else if currentW < 520 {
+            nextW = 620 // Wide
+        } else if currentW < 750 {
+            nextW = 894 // Full rack
+        } else {
+            nextW = 320 // Compact
+        }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+            moduleCustomWidths[module] = nextW
+        }
+        saveModuleSizes()
+        SoundEffect.knobTick.play(with: soundPack)
+    }
+
+    func moduleWidthPresetLabel(_ module: StudioModuleID) -> String {
+        guard let w = moduleCustomWidths[module] else { return "HALF" }
+        if w <= 340 { return "COMPACT" }
+        if w <= 480 { return "HALF" }
+        if w <= 700 { return "WIDE" }
+        return "FULL"
+    }
+
+    func resetModuleLayout() {
+        SoundEffect.presetSwitch.play(with: soundPack)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.75)) {
+            leftWingModules = [.showControl, .memorySlots]
+            rightWingModules = [.midiRouter, .customFXStudio]
+            bottomRackModules = [.reactiveKeyFX]
+            moduleOrder = leftWingModules + rightWingModules + bottomRackModules
+            moduleCustomHeights.removeAll()
+            moduleCustomWidths.removeAll()
+            leftWingWidth = 274
+            rightWingWidth = 274
+        }
+        saveModuleLayout()
+        saveModuleSizes()
+        log("🔄 Reset Module Layout to Default Positions")
+    }
+
+    private func saveModuleOrder() {
+        if let encoded = try? JSONEncoder().encode(moduleOrder) {
+            UserDefaults.standard.set(encoded, forKey: moduleOrderStorageKey)
+        }
+    }
+
+    func popOutModuleToWindow(_ module: StudioModuleID) {
+        if spotlightModule == module {
+            withAnimation { spotlightModule = nil }
+        }
+        if let existing = moduleWindows[module] {
+            existing.makeKeyAndOrderFront(nil)
+            detachedModules.insert(module)
+            return
+        }
+
+        let defaultSize = module.idealWindowSize
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: defaultSize.width, height: defaultSize.height),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = "BitchManager // \(module.rawValue)"
+        win.appearance = NSAppearance(named: .darkAqua)
+        win.backgroundColor = NSColor(calibratedRed: 0.02, green: 0.06, blue: 0.05, alpha: 1.0)
+        win.isReleasedWhenClosed = false
+        win.level = isModuleWindowTopMost(module) ? .floating : .normal
+        win.contentMinSize = module.minWindowSize
+        win.contentAspectRatio = defaultSize
+        win.center()
+
+        let delegate = ModuleWindowCloseDelegate(module: module, engine: self)
+        moduleWindowDelegates[module] = delegate
+        win.delegate = delegate
+
+        let rootView = DetachedModuleWindowHostView(engine: self, module: module)
+        win.contentView = NSHostingView(rootView: rootView)
+        moduleWindows[module] = win
+        detachedModules.insert(module)
+        win.makeKeyAndOrderFront(nil)
+        SoundEffect.presetSwitch.play(with: soundPack)
+        log("⧉ Popped out '\(module.rawValue)' into standalone window")
+    }
+
+    func dockModuleBackFromWindow(_ module: StudioModuleID, fromWindowClose: Bool = false) {
+        if !fromWindowClose, let win = moduleWindows[module] {
+            win.delegate = nil
+            win.close()
+        }
+        moduleWindows.removeValue(forKey: module)
+        moduleWindowDelegates.removeValue(forKey: module)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+            _ = detachedModules.remove(module)
+        }
+        SoundEffect.knobTick.play(with: soundPack)
+        log("↙ Docked '\(module.rawValue)' back into main console")
     }
 
     func setManualZoom(_ newScale: CGFloat) {
@@ -1977,9 +5104,20 @@ final class BitchBoyEngine: ObservableObject {
     }
 
     func loadCustomEffectsFromDisk() {
+        if UserDefaults.standard.object(forKey: connectFXEnabledStorageKey) != nil {
+            connectEffectEnabled = UserDefaults.standard.bool(forKey: connectFXEnabledStorageKey)
+        }
+        if let savedConnectName = UserDefaults.standard.string(forKey: connectFXNameStorageKey), !savedConnectName.isEmpty {
+            connectCustomFXName = savedConnectName
+        }
+
         if let data = UserDefaults.standard.data(forKey: customFXStorageKey),
-           let decoded = try? JSONDecoder().decode([CustomLightEffect].self, from: data),
+           var decoded = try? JSONDecoder().decode([CustomLightEffect].self, from: data),
            !decoded.isEmpty {
+            // Ensure the built-in BITCHBOY CONNECT IGNITION effect is present
+            if !decoded.contains(where: { $0.name == "BITCHBOY CONNECT IGNITION" }) {
+                decoded.insert(CustomLightEffect.buildDefaultConnectEffect(), at: 0)
+            }
             self.customEffects = decoded
             self.editingCustomFX = decoded[0]
             return
@@ -2160,7 +5298,7 @@ final class BitchBoyEngine: ObservableObject {
     func randomizeCurrentFrameSparks() {
         guard !editingCustomFX.frames.isEmpty else { return }
         let safeIdx = min(max(0, editingFrameIndex), editingCustomFX.frames.count - 1)
-        let palette: [UInt8] = [0, 0, 5, 14, 24, 38, 52, 68, 84, 98, 112, 127]
+        let palette: [UInt8] = [0, 0, 72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
         for k in 0..<49 {
             editingCustomFX.frames[safeIdx][k] = palette.randomElement() ?? 0
         }
@@ -2170,7 +5308,7 @@ final class BitchBoyEngine: ObservableObject {
     func applyRainbowToCurrentFrame() {
         guard !editingCustomFX.frames.isEmpty else { return }
         let safeIdx = min(max(0, editingFrameIndex), editingCustomFX.frames.count - 1)
-        let rainbow: [UInt8] = [5, 14, 24, 38, 52, 68, 84, 98, 112, 122, 127]
+        let rainbow: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
         for k in 0..<49 {
             let col = BitchBoyKeyMap.keyPositions[k].col
             editingCustomFX.frames[safeIdx][k] = rainbow[(col + safeIdx) % rainbow.count]
@@ -2267,25 +5405,39 @@ final class BitchBoyEngine: ObservableObject {
                 let activeFX = self.editingCustomFX
                 if activeFX.isProcedural {
                     phase += 0.06 * self.fxSpeed
+                    var batch = self.controls
+                    var didChange = false
                     for k in 0..<49 {
                         let v = self.evaluateProceduralWave(fx: activeFX, keyIndex: k, phase: phase)
-                        if self.controls[k].currentLED != v {
-                            self.controls[k].currentLED = v
-                            self.sendNoteOn(note: self.controls[k].number, velocity: v)
+                        if batch[k].currentLED != v {
+                            batch[k].currentLED = v
+                            didChange = true
+                            self.sendNoteOn(note: batch[k].number, velocity: v)
                         }
+                    }
+                    if didChange {
+                        self.controls = batch
                     }
                 } else {
                     let count = activeFX.frames.count
                     guard count > 0 else { return }
                     let idx = min(max(0, self.customFXStep), count - 1)
-                    self.editingFrameIndex = idx
+                    if self.editingFrameIndex != idx {
+                        self.editingFrameIndex = idx
+                    }
                     let frame = activeFX.frames[idx]
+                    var batch = self.controls
+                    var didChange = false
                     for k in 0..<min(49, frame.count) {
                         let v = frame[k]
-                        if self.controls[k].currentLED != v {
-                            self.controls[k].currentLED = v
-                            self.sendNoteOn(note: self.controls[k].number, velocity: v)
+                        if batch[k].currentLED != v {
+                            batch[k].currentLED = v
+                            didChange = true
+                            self.sendNoteOn(note: batch[k].number, velocity: v)
                         }
+                    }
+                    if didChange {
+                        self.controls = batch
                     }
 
                     if count > 1 {
@@ -2365,12 +5517,20 @@ final class BitchBoyEngine: ObservableObject {
                 }
             }
         case .osc:
-            sendOSC(host: item.oscHost, port: item.oscPort, address: item.oscAddress)
+            // Unified handling with range scaling, release, and live values in sendOSCForControl
+            break
         case .applescript:
             let task = Process()
             task.launchPath = "/usr/bin/osascript"
             task.arguments = ["-e", item.appleScript]
             try? task.run()
+        case .msc:
+            let cmd = MSCCommand(rawValue: item.mscCommand) ?? .go
+            sendMSCBroadcast(command: cmd, cue: item.mscCueNumber, deviceID: mscDeviceID, format: mscCommandFormat)
+        case .artnet:
+            sendArtNetFullRig()
+        case .sacn:
+            sendsACNFullRig()
         }
     }
 
@@ -2489,8 +5649,32 @@ final class BitchBoyEngine: ObservableObject {
 }
 
 // ============================================================================
-// 3. HARDWARE VISUAL COMPONENTS
+// 3. HARDWARE VISUAL COMPONENTS & INTERACTIVE HOVER ENGINE
 // ============================================================================
+
+struct HoverGrowModifier: ViewModifier {
+    var scale: CGFloat = 1.06
+    var lift: CGFloat = 0.0
+    var brightnessBoost: Double = 0.03
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isHovered ? scale : 1.0)
+            .offset(y: isHovered ? -lift : 0)
+            .brightness(isHovered ? brightnessBoost : 0.0)
+            .animation(.spring(response: 0.22, dampingFraction: 0.72), value: isHovered)
+            .onHover { hovering in
+                isHovered = hovering
+            }
+    }
+}
+
+extension View {
+    func hoverGrow(_ scale: CGFloat = 1.06, lift: CGFloat = 0.0, brightnessBoost: Double = 0.03) -> some View {
+        self.modifier(HoverGrowModifier(scale: scale, lift: lift, brightnessBoost: brightnessBoost))
+    }
+}
 
 struct ScrewRivetView: View {
     var size: CGFloat = 11
@@ -2623,6 +5807,8 @@ struct HardwareKeyCap: View {
     let sectionBorder: Color
     let onTap: () -> Void
 
+    @State private var isHovered = false
+
     var isLit: Bool { item.currentLED > 0 }
 
     var body: some View {
@@ -2645,10 +5831,10 @@ struct HardwareKeyCap: View {
                     .stroke(
                         isSelected
                             ? Color(red: 0.22, green: 0.96, blue: 0.76)
-                            : sectionBorder.opacity(0.85),
-                        lineWidth: isSelected ? 2.0 : 1.0
+                            : (isHovered ? Color.white.opacity(0.9) : sectionBorder.opacity(0.85)),
+                        lineWidth: (isSelected || isHovered) ? 2.0 : 1.0
                     )
-                    .shadow(color: isSelected ? Color(red: 0.22, green: 0.96, blue: 0.76).opacity(0.8) : (isLit ? color.opacity(0.6) : .clear), radius: isLit ? 6 : 2)
+                    .shadow(color: isHovered ? (isLit ? color.opacity(0.95) : Color.white.opacity(0.4)) : (isSelected ? Color(red: 0.22, green: 0.96, blue: 0.76).opacity(0.8) : (isLit ? color.opacity(0.6) : .clear)), radius: isHovered ? 7 : (isLit ? 6 : 2))
 
                 // Labels & Center Action Cross
                 VStack(spacing: 0) {
@@ -2680,8 +5866,12 @@ struct HardwareKeyCap: View {
                 }
             }
             .frame(width: 44, height: 40)
-            .scaleEffect(item.isPressed ? 0.92 : 1.0)
+            .scaleEffect(item.isPressed ? 0.92 : (isHovered ? 1.08 : 1.0))
+            .animation(.spring(response: 0.18, dampingFraction: 0.65), value: isHovered)
             .animation(.spring(response: 0.15, dampingFraction: 0.6), value: item.isPressed)
+            .onHover { hovering in
+                isHovered = hovering
+            }
         }
         .buttonStyle(.plain)
     }
@@ -2692,6 +5882,9 @@ struct HardwareKeyCap: View {
         case .qwerty: return "command"
         case .osc: return "antenna.radiowaves.left.and.right"
         case .applescript: return "applescript"
+        case .msc: return "dot.radiowaves.left.and.right"
+        case .artnet: return "lightbulb.fill"
+        case .sacn: return "sparkles"
         }
     }
 }
@@ -2924,8 +6117,17 @@ struct WindowLevelAndSizeAccessor: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            configureWindow(nsView.window)
+        if let win = nsView.window {
+            let targetLevel: NSWindow.Level = isAlwaysOnTop ? .floating : .normal
+            if win.level != targetLevel {
+                win.level = targetLevel
+            }
+            if win.contentAspectRatio != baseSize {
+                win.contentAspectRatio = baseSize
+                let minContentW = baseSize.width * minScale
+                let minContentH = baseSize.height * minScale
+                win.contentMinSize = NSSize(width: minContentW, height: minContentH)
+            }
         }
     }
 
@@ -2936,24 +6138,85 @@ struct WindowLevelAndSizeAccessor: NSViewRepresentable {
         let minContentH = baseSize.height * minScale
         window.contentMinSize = NSSize(width: minContentW, height: minContentH)
         window.contentAspectRatio = baseSize
+    }
+}
 
-        // If the window's current aspect ratio is out of sync and would cause letterboxing or clipping, snap height to match width aspect ratio
-        if let contentView = window.contentView {
-            let cw = max(minContentW, contentView.bounds.width)
-            let expectedH = round(cw * (baseSize.height / baseSize.width))
-            if abs(contentView.bounds.height - expectedH) > 6 {
-                window.setContentSize(NSSize(width: cw, height: expectedH))
-            }
+final class ModuleWindowCloseDelegate: NSObject, NSWindowDelegate {
+    let module: StudioModuleID
+    weak var engine: BitchBoyEngine?
+
+    init(module: StudioModuleID, engine: BitchBoyEngine) {
+        self.module = module
+        self.engine = engine
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.engine?.dockModuleBackFromWindow(self.module, fromWindowClose: true)
         }
+    }
+}
+
+struct ModuleSlotDropDelegate: DropDelegate {
+    let targetModule: StudioModuleID
+    let engine: BitchBoyEngine
+
+    func performDrop(info: DropInfo) -> Bool {
+        if let dragged = engine.draggingModule, dragged != targetModule {
+            engine.swapModules(dragged, targetModule)
+        }
+        engine.draggingModule = nil
+        return true
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let dragged = engine.draggingModule, dragged != targetModule else { return }
+        engine.swapModules(dragged, targetModule)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+}
+
+struct ZoneDropDelegate: DropDelegate {
+    let targetZone: ModuleZone
+    let engine: BitchBoyEngine
+
+    func performDrop(info: DropInfo) -> Bool {
+        if let dragged = engine.draggingModule {
+            engine.moveModuleToZone(dragged, zone: targetZone)
+        }
+        engine.draggingModule = nil
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+}
+
+struct DetachedModuleWindowHostView: View {
+    @ObservedObject var engine: BitchBoyEngine
+    let module: StudioModuleID
+
+    var body: some View {
+        ContentView(engine: engine, standaloneModule: module)
     }
 }
 
 struct ContentView: View {
     @ObservedObject var engine: BitchBoyEngine
+    var standaloneModule: StudioModuleID? = nil
+
     @State private var isHoveringLoveBadge: Bool = false
     @State private var isHoveringTitleLogo: Bool = false
     @State private var activeMemoryBank: Int = 0 // 0 = BANK 1 (A-D), 1 = BANK 2 (E-H)
     @State private var showSlotCustomizer: Bool = false
+    @State private var jigglePhase: Bool = false
+    @State private var resizingModule: StudioModuleID? = nil
+    @State private var dragInitialHeight: CGFloat = 0
 
     var selectedControl: ControlItem {
         if engine.selectedIndex < engine.controls.count {
@@ -2963,38 +6226,111 @@ struct ContentView: View {
     }
 
     private func ledColor(_ vel: UInt8) -> Color {
-        if vel == 0 { return Color(white: 0.14) }
+        if vel == 0 { return BitchBoyHardwareColor.off }
 
         switch engine.ledPalette {
         case .multiVelocity:
-            if vel < 16 { return Color(red: 1.0, green: 0.23, blue: 0.19) }
-            if vel < 32 { return Color(red: 1.0, green: 0.58, blue: 0.0) }
-            if vel < 48 { return Color(red: 1.0, green: 0.84, blue: 0.04) }
-            if vel < 64 { return Color(red: 0.19, green: 0.82, blue: 0.35) }
-            if vel < 85 { return Color(red: 0.0, green: 0.83, blue: 1.0) }
-            if vel < 108 { return Color(red: 0.69, green: 0.32, blue: 0.87) }
-            return Color(red: 0.88, green: 0.98, blue: 1.0)
+            return BitchBoyHardwareColor.color(for: vel)
         case .cyberCyan:
-            return Color(red: 0.22, green: 0.96, blue: 0.85)
+            return BitchBoyHardwareColor.cyan
         case .matrixGreen:
-            return Color(red: 0.15, green: 0.95, blue: 0.35)
+            return BitchBoyHardwareColor.green
         case .solarAmber:
-            return Color(red: 1.0, green: 0.72, blue: 0.10)
+            return BitchBoyHardwareColor.amber
         case .synthMagenta:
-            return Color(red: 0.95, green: 0.25, blue: 0.85)
+            return BitchBoyHardwareColor.pink
         case .arcticWhite:
-            return Color(white: 0.96)
+            return BitchBoyHardwareColor.white
         }
     }
 
     var body: some View {
+        if let detachedMod = standaloneModule {
+            standaloneModuleWindowBody(for: detachedMod)
+                .preferredColorScheme(.dark)
+        } else {
+            mainConsoleWindowBody
+                .preferredColorScheme(.dark)
+        }
+    }
+
+    private func standaloneModuleWindowBody(for module: StudioModuleID) -> some View {
+        GeometryReader { geo in
+            let isTopMost = engine.isModuleWindowTopMost(module)
+
+            ZStack {
+                Color(red: 0.02, green: 0.05, blue: 0.04)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    HStack(spacing: 6) {
+                        Image(systemName: module.iconName)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(engine.currentTheme.accentPrimary)
+                        Text("FLOATING // \(module.rawValue.uppercased())")
+                            .font(.system(size: 9, weight: .heavy, design: .monospaced))
+                            .foregroundColor(.white)
+                        Spacer()
+
+                        // TOP MOST PIN TOGGLE
+                        Button(action: {
+                            engine.toggleModuleWindowTopMost(module)
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: isTopMost ? "pin.fill" : "pin")
+                                Text(isTopMost ? "PINNED" : "PIN")
+                            }
+                            .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3.5)
+                            .background(isTopMost ? Color(red: 1.0, green: 0.35, blue: 0.15) : Color.white.opacity(0.12))
+                            .foregroundColor(isTopMost ? .black : .white)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(isTopMost ? Color.orange : Color.white.opacity(0.2), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Pin window Always on Top")
+                        .hoverGrow(1.05)
+
+                        // DOCK BACK
+                        Button(action: {
+                            engine.dockModuleBackFromWindow(module)
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.down.left.square.fill")
+                                Text("DOCK")
+                            }
+                            .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3.5)
+                            .background(engine.currentTheme.accentPrimary)
+                            .foregroundColor(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                        .buttonStyle(.plain)
+                        .hoverGrow(1.05)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.6))
+                    .overlay(Rectangle().frame(height: 1).foregroundColor(engine.currentTheme.accentPrimary.opacity(0.4)), alignment: .bottom)
+
+                    moduleContentView(for: module, isSpotlight: true)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
+            }
+        }
+    }
+
+    private var mainConsoleWindowBody: some View {
         GeometryReader { windowGeo in
             let baseWidth: CGFloat = BitchBoyEngine.consoleBaseWidth
-            let baseHeight: CGFloat = BitchBoyEngine.consoleBaseHeight
+            let baseHeight: CGFloat = engine.effectiveConsoleHeight
             // ALWAYS fit inside windowGeo.size so the window NEVER clips any controls at any size!
             let fitW = max(0.15, windowGeo.size.width / baseWidth)
             let fitH = max(0.15, windowGeo.size.height / baseHeight)
             let fitScale = min(2.4, min(fitW, fitH))
+            let isOverlayActive = (engine.spotlightModule != nil || engine.showCustomSoundStudio || engine.showCustomThemeStudio || engine.showUpdateModal)
 
             ZStack {
                 // Lock NSWindow aspect ratio & minimum size (15% of controller) so dragging the window scales the whole controller proportionally with zero clipping
@@ -3009,12 +6345,243 @@ struct ContentView: View {
                 Color(red: 0.02, green: 0.05, blue: 0.04)
                     .ignoresSafeArea()
 
-                VStack(spacing: 12) {
-                    topNavigationBar
-                    mainHardwareFaceplate
+                ZStack {
+                    // Main Console Layer (Blurs smoothly when a module is Spotlit in the center or Custom Sound Studio is open!)
+                    ZStack(alignment: .top) {
+                        VStack(spacing: 12) {
+                            topNavigationBar
+                            mainHardwareFaceplate
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+
+                        if engine.showConnectionBanner {
+                            HStack(spacing: 12) {
+                                Image("BitchBoyBadgeIcon")
+                                    .resizable()
+                                    .interpolation(.high)
+                                    .scaledToFit()
+                                    .frame(width: 32, height: 32)
+                                    .shadow(color: Color(red: 0.2, green: 0.98, blue: 0.55), radius: 8)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(engine.connectionBannerTitle)
+                                        .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                                        .foregroundColor(Color(red: 0.25, green: 1.0, blue: 0.60))
+                                    Text(engine.connectionBannerSubtitle)
+                                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.white)
+                                }
+
+                                Button(action: {
+                                    withAnimation { engine.showConnectionBanner = false }
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(Color.white.opacity(0.75))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .fill(Color(red: 0.03, green: 0.16, blue: 0.12).opacity(0.96))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color(red: 0.2, green: 0.98, blue: 0.55), lineWidth: 1.8)
+                            )
+                            .shadow(color: Color(red: 0.2, green: 0.98, blue: 0.55).opacity(0.75), radius: 18, x: 0, y: 4)
+                            .padding(.top, 54)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+
+                        if engine.showUpToDateNotice {
+                            HStack(spacing: 10) {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .foregroundColor(Color.green)
+                                Text(engine.updateCheckResultNotice)
+                                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.white)
+                                Button(action: {
+                                    withAnimation { engine.showUpToDateNotice = false }
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(Color.white.opacity(0.75))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 9)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color(red: 0.03, green: 0.16, blue: 0.12).opacity(0.96))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.green.opacity(0.8), lineWidth: 1.5)
+                            )
+                            .shadow(color: Color.green.opacity(0.6), radius: 14, x: 0, y: 3)
+                            .padding(.top, 54)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
+                    .compositingGroup()
+                    .blur(radius: isOverlayActive ? 14 : 0)
+                    .scaleEffect(isOverlayActive ? 0.97 : 1.0)
+                    .animation(.spring(response: 0.34, dampingFraction: 0.8), value: isOverlayActive)
+
+                    // CENTER SPOTLIGHT MODULE OVERLAY (When user clicks the top bar of any module!)
+                    if let spotMod = engine.spotlightModule {
+                        ZStack {
+                            // Clickable translucent cyber backdrop over the blurred console
+                            Color.black.opacity(0.65)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                                        engine.spotlightModule = nil
+                                    }
+                                }
+
+                            VStack(spacing: 0) {
+                                // Spotlight Control Strip
+                                HStack(spacing: 8) {
+                                    Image(systemName: spotMod.iconName)
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundColor(engine.currentTheme.accentPrimary)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        HStack(spacing: 6) {
+                                            Text("CENTER SPOTLIGHT // \(spotMod.rawValue.uppercased())")
+                                                .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                                                .foregroundColor(.white)
+                                            Circle().fill(Color.green).frame(width: 6, height: 6)
+                                            Text("LIVE")
+                                                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                                                .foregroundColor(Color.green)
+                                        }
+                                        Text("Enlarged studio view • Edit settings or pop out to floating window")
+                                            .font(.system(size: 7, design: .monospaced))
+                                            .foregroundColor(Color(white: 0.6))
+                                    }
+
+                                    Spacer()
+
+                                    // Dynamic Size Presets inside Spotlight
+                                    HStack(spacing: 2) {
+                                        Button(action: {
+                                            engine.setModuleHeight(spotMod, height: 210, save: true)
+                                        }) {
+                                            Text("COMPACT")
+                                                .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 3.5)
+                                                .background(Color.white.opacity(0.08))
+                                                .foregroundColor(Color(white: 0.75))
+                                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        Button(action: {
+                                            engine.setModuleHeight(spotMod, height: 340, save: true)
+                                        }) {
+                                            Text("STANDARD")
+                                                .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 3.5)
+                                                .background(Color.white.opacity(0.08))
+                                                .foregroundColor(Color(white: 0.75))
+                                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        Button(action: {
+                                            engine.setModuleHeight(spotMod, height: 480, save: true)
+                                        }) {
+                                            Text("EXPANDED")
+                                                .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 3.5)
+                                                .background(Color.white.opacity(0.08))
+                                                .foregroundColor(Color(white: 0.75))
+                                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+
+                                    Button(action: {
+                                        engine.popOutModuleToWindow(spotMod)
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "macwindow.badge.plus")
+                                            Text("OPEN IN OWN WINDOW")
+                                        }
+                                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(Color.white.opacity(0.14))
+                                        .foregroundColor(engine.currentTheme.accentPrimary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .hoverGrow(1.05)
+
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                                            engine.spotlightModule = nil
+                                        }
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "xmark.circle.fill")
+                                            Text("RETURN TO DOCK")
+                                        }
+                                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(engine.currentTheme.accentPrimary)
+                                        .foregroundColor(.black)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .hoverGrow(1.05)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(Color(red: 0.04, green: 0.10, blue: 0.09).opacity(0.98))
+                                .overlay(Rectangle().frame(height: 1).foregroundColor(engine.currentTheme.accentPrimary.opacity(0.3)), alignment: .bottom)
+
+                                // Module Content Rendered in full width, crisp and responsive with NO scaleEffect!
+                                moduleContentView(for: spotMod, isSpotlight: true)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            }
+                            .frame(width: 720, height: 600)
+                            .background(Color(red: 0.03, green: 0.05, blue: 0.06).opacity(0.98))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(engine.currentTheme.accentPrimary, lineWidth: 1.5))
+                            .shadow(color: engine.currentTheme.accentPrimary.opacity(0.45), radius: 24, x: 0, y: 8)
+                            .shadow(color: Color.black.opacity(0.9), radius: 36, x: 0, y: 14)
+                            .transition(.scale(scale: 0.88).combined(with: .opacity))
+                        }
+                    }
+
+                    // CUSTOM SOUND UPLOAD STUDIO OVERLAY (Centered with Blurred Console Behind It)
+                    if engine.showCustomSoundStudio {
+                        customSoundStudioOverlay
+                            .transition(.scale(scale: 0.88).combined(with: .opacity))
+                    }
+
+                    // CUSTOM THEME STUDIO OVERLAY (Centered with Blurred Console Behind It)
+                    if engine.showCustomThemeStudio {
+                        customThemeStudioOverlay
+                            .transition(.scale(scale: 0.88).combined(with: .opacity))
+                    }
+
+                    // GITHUB AUTO-UPDATER OVERLAY (Centered with Blurred Console Behind It)
+                    if engine.showUpdateModal {
+                        updateSheetOverlay
+                            .transition(.scale(scale: 0.88).combined(with: .opacity))
+                    }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
                 .frame(width: baseWidth, height: baseHeight, alignment: .top)
                 .scaleEffect(fitScale, anchor: .center)
                 .frame(width: windowGeo.size.width, height: windowGeo.size.height, alignment: .center)
@@ -3023,11 +6590,21 @@ struct ContentView: View {
                 engine.lastComputedFitScale = fitScale
                 engine.applyWindowAlwaysOnTop()
             }
-            .onChange(of: windowGeo.size) { _ in
+            .onChange(of: windowGeo.size) {
                 engine.lastComputedFitScale = fitScale
             }
+            .onChange(of: engine.isRearrangingModules) {
+                if engine.isRearrangingModules {
+                    withAnimation(.easeInOut(duration: 0.13).repeatForever(autoreverses: true)) {
+                        jigglePhase = true
+                    }
+                } else {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        jigglePhase = false
+                    }
+                }
+            }
         }
-        .preferredColorScheme(.dark)
     }
 
     // ------------------------------------------------------------------------
@@ -3065,14 +6642,6 @@ struct ContentView: View {
                             .shadow(color: engine.currentTheme.accentPrimary.opacity(isHoveringTitleLogo ? 0.65 : 0.42), radius: isHoveringTitleLogo ? 22 : 16, x: 0, y: 0)
                             .scaleEffect(isHoveringTitleLogo ? 1.03 : 1.0)
                             .animation(.easeInOut(duration: 0.2), value: isHoveringTitleLogo)
-
-                        Text(engine.isLocked ? "69-MAP LOCKED" : "69-MAP UNLOCKED")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(engine.isLocked ? engine.currentTheme.accentPrimary : Color.yellow)
-                            .foregroundColor(.black)
-                            .clipShape(Capsule())
                     }
 
                     Text("BLOCK SYSTEM HARDWARE // LED & ACTION ENGINE")
@@ -3088,31 +6657,113 @@ struct ContentView: View {
 
             Spacer(minLength: 8)
 
-            // Status Pill (Online / Offline)
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(engine.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.45) : Color(red: 0.98, green: 0.25, blue: 0.25))
-                    .frame(width: 8, height: 8)
-                    .shadow(color: engine.isConnected ? Color.green : Color.red, radius: 4)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(engine.isConnected ? "ONLINE // CONNECTED" : "OFFLINE // DISCONNECTED")
-                        .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
-                        .foregroundColor(engine.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.45) : Color(red: 0.98, green: 0.35, blue: 0.35))
-
-                    Text(engine.isConnected ? "\(engine.deviceName) // Ready" : "Unplugged // Waiting for BitchBoy...")
-                        .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                        .foregroundColor(Color(white: 0.65))
+            // Status Pill (Online / Offline — Strictly ONLY BitchBoy Hardware Controller)
+            Menu {
+                Section("BitchBoy Hardware Status (Strict BitchBoy Only)") {
+                    Button(action: {
+                        engine.scanForBitchBoy()
+                    }) {
+                        Label("Rescan for BitchBoy Hardware Now", systemImage: "arrow.clockwise")
+                    }
                 }
+                Section("On-Connect Notification FX (When BitchBoy Plugs In)") {
+                    Button(action: {
+                        engine.toggleConnectEffectEnabled()
+                    }) {
+                        Label(
+                            engine.connectEffectEnabled ? "On-Connect FX: ENABLED" : "On-Connect FX: DISABLED",
+                            systemImage: engine.connectEffectEnabled ? "checkmark.circle.fill" : "circle"
+                        )
+                    }
+                    ForEach(engine.customEffects) { fx in
+                        Button(action: {
+                            engine.setAsOnConnectFX(fx)
+                        }) {
+                            Label(
+                                fx.name == engine.connectCustomFXName ? "★ \(fx.name) (Active Connect FX)" : "Set '\(fx.name)' as Connect FX",
+                                systemImage: fx.name == engine.connectCustomFXName ? "bolt.fill" : "sparkles"
+                            )
+                        }
+                    }
+                    Divider()
+                    Button(action: {
+                        engine.triggerBitchBoyConnectedNotificationFX(isManualTest: true)
+                    }) {
+                        Label("Preview On-Connect FX Now", systemImage: "play.fill")
+                    }
+                }
+                Section("BitchManager Updates & GitHub Release") {
+                    Text("Installed Version: v\(engine.currentAppVersion)")
+                    if let rel = engine.latestRelease {
+                        Text("Latest on GitHub: \(rel.tagName)")
+                    }
+                    Button(action: {
+                        engine.checkForUpdates(showModalIfCurrent: true)
+                    }) {
+                        Label(engine.isCheckingForUpdates ? "Checking GitHub..." : "Check for Updates on GitHub...", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(engine.isCheckingForUpdates)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(engine.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.45) : Color(red: 0.98, green: 0.25, blue: 0.25))
+                        .frame(width: 8, height: 8)
+                        .shadow(color: engine.isConnected ? Color.green : Color.red, radius: 4)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(engine.isConnected ? "ONLINE // CONNECTED" : "OFFLINE // DISCONNECTED")
+                            .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.45) : Color(red: 0.98, green: 0.35, blue: 0.35))
+
+                        Text(engine.isConnected ? "\(engine.deviceName) // Ready" : "Unplugged // Waiting for BitchBoy...")
+                            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color(white: 0.65))
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Color.black.opacity(0.5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(engine.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.45).opacity(0.6) : Color(red: 0.98, green: 0.35, blue: 0.35).opacity(0.6), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(Color.black.opacity(0.5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(engine.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.45).opacity(0.6) : Color(red: 0.98, green: 0.35, blue: 0.35).opacity(0.6), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .menuStyle(.borderlessButton)
+            .hoverGrow(1.05)
+
+            // GITHUB AUTO-UPDATE DETECTED PILL
+            if engine.updateAvailable, let rel = engine.latestRelease {
+                Button(action: {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                        engine.showUpdateModal = true
+                    }
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("★ UPDATE: \(rel.tagName)")
+                            .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 9))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(red: 0.98, green: 0.72, blue: 0.22), Color(red: 0.95, green: 0.42, blue: 0.15)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .foregroundColor(.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .shadow(color: Color.orange.opacity(0.85), radius: 8)
+                }
+                .buttonStyle(.plain)
+                .hoverGrow(1.06)
+            }
 
             Spacer(minLength: 8)
 
@@ -3178,6 +6829,7 @@ struct ContentView: View {
                     .shadow(color: engine.isWindowAlwaysOnTop ? engine.currentTheme.accentPrimary.opacity(0.6) : .clear, radius: 6)
                 }
                 .buttonStyle(.plain)
+                .hoverGrow(1.06)
 
                 // UI SCALE / ZOOM CONTROLLER + APP ICON MENU
                 HStack(spacing: 3) {
@@ -3193,6 +6845,7 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                     .buttonStyle(.plain)
+                    .hoverGrow(1.10)
 
                     Menu {
                         Button(action: {
@@ -3232,6 +6885,7 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                     .menuStyle(.borderlessButton)
+                    .hoverGrow(1.06)
 
                     Button(action: {
                         engine.zoomInUI()
@@ -3245,6 +6899,7 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                     .buttonStyle(.plain)
+                    .hoverGrow(1.10)
                 }
                 .padding(2)
                 .background(Color.black.opacity(0.45))
@@ -3299,19 +6954,61 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.18), lineWidth: 1))
                 }
+                .menuStyle(.borderlessButton)
+                .hoverGrow(1.06)
 
                 // Theme Picker Menu
                 Menu {
-                    ForEach(ChassisTheme.allCases) { th in
-                        Button(th.rawValue) {
-                            engine.currentTheme = th
-                            SoundEffect.presetSwitch.play(with: engine.soundPack)
+                    Section("Built-in Cyber Chassis Themes") {
+                        ForEach(ChassisTheme.allCases.filter { $0 != .customUser }) { th in
+                            Button(action: {
+                                engine.currentTheme = th
+                                UserDefaults.standard.set(th.rawValue, forKey: "BitchBoy_ChassisTheme_v2")
+                                SoundEffect.presetSwitch.play(with: engine.soundPack)
+                            }) {
+                                HStack {
+                                    Text(th.rawValue)
+                                    if engine.currentTheme == th {
+                                        Spacer()
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Section("Custom Glow Themes") {
+                        ForEach(engine.customThemes) { customTh in
+                            Button(action: {
+                                engine.applyCustomTheme(customTh)
+                            }) {
+                                HStack {
+                                    Text(customTh.name)
+                                    if engine.currentTheme == .customUser && engine.activeCustomTheme.id == customTh.id {
+                                        Spacer()
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+
+                        Divider()
+
+                        Button(action: {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.78)) {
+                                engine.spotlightModule = nil
+                                engine.showCustomSoundStudio = false
+                                engine.showCustomThemeStudio = true
+                            }
+                        }) {
+                            Label("🎨 Custom Theme Studio...", systemImage: "paintpalette.fill")
                         }
                     }
                 } label: {
+                    let displayName = engine.currentTheme == .customUser ? engine.activeCustomTheme.name : engine.currentTheme.rawValue
                     HStack(spacing: 4) {
                         Text("🎨")
-                        Text(engine.currentTheme.rawValue)
+                        Text(displayName)
                             .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                     }
                     .padding(.horizontal, 10)
@@ -3321,27 +7018,125 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.18), lineWidth: 1))
                 }
+                .menuStyle(.borderlessButton)
+                .hoverGrow(1.06)
 
-                // Sound Pack Menu
+                // Sound Pack & Custom Sound Upload Menu
                 Menu {
+                    Button(action: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.78)) {
+                            engine.spotlightModule = nil
+                            engine.showCustomSoundStudio = true
+                        }
+                    }) {
+                        Label("🎛️ Upload / Manage Custom Sounds...", systemImage: "waveform.badge.plus")
+                    }
+                    Divider()
                     ForEach(SoundPack.allCases) { pack in
-                        Button(pack.rawValue) {
-                            engine.soundPack = pack
-                            SoundEffect.presetSwitch.play(with: pack)
+                        Button(action: {
+                            engine.setSoundPack(pack)
+                        }) {
+                            HStack {
+                                Text(pack.rawValue)
+                                if engine.soundPack == pack {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    Text("Quick Upload Custom Audio:")
+                    ForEach(SoundEffect.allCases) { sfx in
+                        Button(action: {
+                            engine.uploadCustomSoundFile(for: sfx)
+                        }) {
+                            let currentFile = CustomSoundBank.shared.fileName(for: sfx)
+                            Label(
+                                currentFile != nil ? "\(sfx.displayName) (\(currentFile!))" : "Upload \(sfx.displayName)...",
+                                systemImage: sfx.iconName
+                            )
                         }
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: engine.soundPack == .mute ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        Image(systemName: engine.soundPack == .mute ? "speaker.slash.fill" : (engine.soundPack == .customUser ? "waveform.badge.mic" : "speaker.wave.2.fill"))
                         Text(engine.soundPack.rawValue)
                             .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.08))
-                    .foregroundColor(Color(white: 0.85))
+                    .background(engine.soundPack == .customUser ? engine.currentTheme.accentPrimary.opacity(0.22) : Color.white.opacity(0.08))
+                    .foregroundColor(engine.soundPack == .customUser ? engine.currentTheme.accentPrimary : Color(white: 0.85))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.18), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(engine.soundPack == .customUser ? engine.currentTheme.accentPrimary.opacity(0.6) : Color.white.opacity(0.18), lineWidth: 1))
+                }
+                .menuStyle(.borderlessButton)
+                .hoverGrow(1.06)
+
+                // iOS-Style Module Rearrange / Jiggle & Pop-Out Window Button
+                HStack(spacing: 3) {
+                    Button(action: {
+                        engine.toggleRearrangeModulesMode()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: engine.isRearrangingModules ? "checkmark.circle.fill" : "square.grid.2x2.fill")
+                                .font(.system(size: 8.5, weight: .bold))
+                            Text(engine.isRearrangingModules ? "DONE" : "MODULES")
+                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 7)
+                        .background(engine.isRearrangingModules ? Color(red: 0.96, green: 0.76, blue: 0.18) : Color.white.opacity(0.08))
+                        .foregroundColor(engine.isRearrangingModules ? .black : engine.currentTheme.accentPrimary)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(engine.isRearrangingModules ? Color.white : Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .hoverGrow(1.06)
+                    .help("Toggle Rearrange & Dynamic Resizing Mode (Drag cards into spaces or resize)")
+
+                    Menu {
+                        Button(action: { engine.toggleRearrangeModulesMode() }) {
+                            Label(engine.isRearrangingModules ? "Lock Layout (Exit Rearrange Mode)" : "Rearrange Mode (Drag into Spaces)", systemImage: engine.isRearrangingModules ? "lock.fill" : "hand.draw.fill")
+                        }
+                        Divider()
+                        Section("LAYOUT PRESETS") {
+                            Button(action: { engine.resetModuleLayout() }) {
+                                Label("Reset All Modules to Default Positions", systemImage: "arrow.counterclockwise")
+                            }
+                            Button(action: {
+                                for m in StudioModuleID.allCases {
+                                    engine.setModuleHeight(m, height: 210, save: false)
+                                }
+                                engine.saveModuleSizes()
+                            }) {
+                                Label("Compact All Modules (210px)", systemImage: "arrow.down.forward.and.arrow.up.backward")
+                            }
+                            Button(action: {
+                                for m in StudioModuleID.allCases {
+                                    engine.setModuleHeight(m, height: 340, save: false)
+                                }
+                                engine.saveModuleSizes()
+                            }) {
+                                Label("Standard Size All Modules (340px)", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 7, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 7)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(engine.currentTheme.accentPrimary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .hoverGrow(1.10)
+                    .help("Layout Options & Quick Presets")
                 }
 
                 // Rainbow Refresh
@@ -3366,6 +7161,7 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
+                .hoverGrow(1.06)
                 .disabled(engine.isRainbowRunning)
 
                 // FX Light Show Menu
@@ -3421,6 +7217,7 @@ struct ContentView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(red: 0.22, green: 0.96, blue: 0.76).opacity(0.6), lineWidth: 1))
                 }
                 .menuStyle(.borderlessButton)
+                .hoverGrow(1.06)
 
                 if engine.currentFXMode != .staticFX || engine.isPlayingCustomFX {
                     Button(action: {
@@ -3439,26 +7236,8 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
+                    .hoverGrow(1.06)
                 }
-
-                // Lock Toggle
-                Button(action: {
-                    engine.isLocked.toggle()
-                    SoundEffect.knobTick.play(with: engine.soundPack)
-                }) {
-                    HStack(spacing: 3) {
-                        Image(systemName: engine.isLocked ? "lock.fill" : "lock.open.fill")
-                        Text(engine.isLocked ? "LOCKED" : "UNLOCKED")
-                            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.08))
-                    .foregroundColor(engine.currentTheme.accentPrimary)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.15), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -3467,7 +7246,7 @@ struct ContentView: View {
     // MAIN HARDWARE FACEPLATE (THE AUTHENTIC CONSOLE LAYOUT)
     // ------------------------------------------------------------------------
     private var mainHardwareFaceplate: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             // Chassis Surface
             RoundedRectangle(cornerRadius: 20)
                 .fill(engine.currentTheme.pcbBackground)
@@ -3504,98 +7283,1430 @@ struct ContentView: View {
             .padding(7)
 
             // FULL-CHASSIS HARDWARE CONSOLE: LEFT WING + CENTER BITCHBOY MATRIX + RIGHT WING
-            HStack(alignment: .top, spacing: 24) {
-                // LEFT WING (RED BOX #1 & #3): MIDI OUTPUT ROUTER / PATCHBAY + 20-CC TELEMETRY + MACROS + MEMORY SLOTS BANK
-                VStack(alignment: .leading, spacing: 10) {
-                    leftWingStudioPanel
-                    leftWingMemorySlotsPanel
-                }
-                .frame(width: 266)
-
-                // CENTER HARDWARE CONSOLE: 8x4 Grid + 1x8 Strip + 8 VFaders + 4 HFaders + Logo + HUD + Knobs + 3x3 Keypad
-                HStack(alignment: .top, spacing: 18) {
-                    // LEFT COLUMN: 8x4 Grid + 1x8 Strip + 8 Vertical Faders + In-Chassis Notes (Width: 414)
-                    VStack(alignment: .leading, spacing: 8) {
-                        section1KeyGrid8x4
-                        section2KeyStrip1x8
-                        section4VerticalFaders
-                        inChassisUserNotes
-                    }
-                    .frame(width: 414)
-
-                    // RIGHT SECTION: Middle Column (Faders + Glowing Logo + HUD) & Far-Right Column (Knobs + Mascot + Keypad)
-                    HStack(alignment: .top, spacing: 14) {
-                        // Middle Column: 4 Horizontal Faders + Glowing BitchBoy Logo + Center Inspector HUD (Width: 254)
+            HStack(alignment: .top, spacing: 20) {
+                // LEFT WING (Modules placed in Left Wing)
+                if !engine.leftWingModules.isEmpty || engine.isRearrangingModules {
+                    ScrollView([.vertical], showsIndicators: true) {
                         VStack(alignment: .leading, spacing: 10) {
-                            section5HorizontalFaders
-                                .frame(width: 254)
-
-                            // Glowing BitchBoy Mascot Logo (Style and glow of BitchBoy Mascot)
-                            BitchBoyGlowingLogoView(auraColor: engine.currentTheme.accentPrimary) {
-                                SoundEffect.mascotSqueak.play(with: engine.soundPack)
-                                engine.log("✨ BITCHBOY LOGO ACTIVATED")
+                            ForEach(engine.leftWingModules) { mod in
+                                dynamicModuleContainer(for: mod, in: .leftWing)
                             }
-                            .frame(width: 254, height: 68)
-
-                            centerInspectorHUD
-                                .frame(width: 254, height: 256)
+                            if engine.isRearrangingModules {
+                                dropTargetCard(forZone: .leftWing)
+                            }
                         }
-                        .frame(width: 254)
-
-                        // Far-Right Column: 2x4 Knobs + Official Mascot & 3x3 Keypad (Width: 194)
-                        VStack(alignment: .center, spacing: 10) {
-                            section6RotaryKnobs
-                                .frame(width: 194)
-
-                            section3KeypadAndMascot
-                                .frame(width: 194)
-                        }
-                        .frame(width: 194)
+                        .padding(.vertical, 2)
                     }
-                    .frame(width: 462)
+                    .frame(width: engine.leftWingWidth)
+                    .frame(height: engine.chassisContentHeight)
+                    .clipped()
                 }
 
-                // RIGHT WING (RED BOX #2 & #4): GROUND-UP CUSTOM LIGHTING FX STUDIO + REACTIVE MECHANICAL KEYBOARD FX ENGINE
-                VStack(alignment: .leading, spacing: 10) {
-                    rightWingStudioPanel
-                    rightWingReactiveKeyFXPanel
+                // CENTER HARDWARE CONSOLE: 8x4 Grid + 1x8 Strip + 8 VFaders + 4 HFaders + Logo + HUD + Knobs + 3x3 Keypad + OPTIONAL BOTTOM RACK
+                VStack(spacing: 12) {
+                    HStack(alignment: .top, spacing: 18) {
+                        // LEFT COLUMN: 8x4 Grid + 1x8 Strip + 8 Vertical Faders (Width: 414)
+                        VStack(alignment: .leading, spacing: 8) {
+                            section1KeyGrid8x4
+                            section2KeyStrip1x8
+                            section4VerticalFaders
+                        }
+                        .frame(width: 414)
+
+                        // RIGHT SECTION: Middle Column (Faders + Glowing Logo + HUD) & Far-Right Column (Knobs + Mascot + Keypad)
+                        HStack(alignment: .top, spacing: 14) {
+                            // Middle Column: 4 Horizontal Faders + Glowing BitchBoy Logo + Center Inspector HUD (Width: 254)
+                            VStack(alignment: .leading, spacing: 10) {
+                                section5HorizontalFaders
+                                    .frame(width: 254)
+
+                                // Glowing BitchBoy Mascot Logo (Style and glow of BitchBoy Mascot)
+                                BitchBoyGlowingLogoView(auraColor: engine.currentTheme.accentPrimary) {
+                                    SoundEffect.mascotSqueak.play(with: engine.soundPack)
+                                    engine.log("✨ BITCHBOY LOGO ACTIVATED")
+                                }
+                                .frame(width: 254, height: 68)
+
+                                centerInspectorHUD
+                                    .frame(width: 254, height: 256)
+                            }
+                            .frame(width: 254)
+
+                            // Far-Right Column: 2x4 Knobs + Official Mascot & 3x3 Keypad (Width: 194)
+                            VStack(alignment: .center, spacing: 10) {
+                                section6RotaryKnobs
+                                    .frame(width: 194)
+
+                                section3KeypadAndMascot
+                                    .frame(width: 194)
+                            }
+                            .frame(width: 194)
+                        }
+                        .frame(width: 462)
+                    }
+
+                    // BOTTOM CONSOLE RACK (Expansion Bay for modules placed in bottom rack!)
+                    if !engine.bottomRackModules.isEmpty || engine.isRearrangingModules {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "rectangle.bottomthird.inset.filled")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(engine.currentTheme.accentPrimary)
+                                Text("CONSOLE EXPANSION BAY // BOTTOM RACK")
+                                    .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                                    .foregroundColor(engine.currentTheme.headerText)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 4)
+
+                            ScrollView([.horizontal], showsIndicators: true) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    ForEach(engine.bottomRackModules) { mod in
+                                        dynamicModuleContainer(for: mod, in: .bottomRack)
+                                            .frame(width: engine.moduleCustomWidths[mod] ?? 435)
+                                    }
+                                    if engine.isRearrangingModules {
+                                        dropTargetCard(forZone: .bottomRack)
+                                            .frame(width: 220)
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                            }
+                            .frame(maxWidth: 894)
+                        }
+                        .padding(8)
+                        .background(Color.black.opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(engine.currentTheme.sectionOutline.opacity(0.4), lineWidth: 1))
+                        .onDrop(of: [.plainText], delegate: ZoneDropDelegate(targetZone: .bottomRack, engine: engine))
+                    } else if engine.chassisContentHeight > 560 {
+                        bottomRackEmptyShelf
+                    }
                 }
-                .frame(width: 274)
+                .frame(height: engine.chassisContentHeight, alignment: .top)
+
+                // RIGHT WING (Modules placed in Right Wing)
+                if !engine.rightWingModules.isEmpty || engine.isRearrangingModules {
+                    ScrollView([.vertical], showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(engine.rightWingModules) { mod in
+                                dynamicModuleContainer(for: mod, in: .rightWing)
+                            }
+                            if engine.isRearrangingModules {
+                                dropTargetCard(forZone: .rightWing)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .frame(width: engine.rightWingWidth)
+                    .frame(height: engine.chassisContentHeight)
+                    .clipped()
+                }
             }
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.horizontal, 18)
             .padding(.vertical, 18)
+        }
+        .frame(height: engine.chassisContentHeight + 36)
+    }
+
+    private var bottomRackEmptyShelf: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "rectangle.bottomthird.inset.filled")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                Text("CONSOLE EXPANSION BAY // BOTTOM RACK READY")
+                    .font(.system(size: 7.8, weight: .heavy, design: .monospaced))
+                    .foregroundColor(engine.currentTheme.headerText)
+                Spacer()
+                Menu {
+                    ForEach(StudioModuleID.allCases) { m in
+                        if engine.currentZone(of: m) != .bottomRack {
+                            Button("Dock \(m.rawValue) Here") {
+                                engine.moveModuleToZone(m, zone: .bottomRack)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "plus.circle.fill")
+                        Text("DOCK MODULE HERE")
+                    }
+                    .font(.system(size: 6.8, weight: .heavy, design: .monospaced))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .menuStyle(.borderlessButton)
+                .hoverGrow(1.06)
+            }
+            .padding(.horizontal, 4)
+
+            VStack(spacing: 6) {
+                Image(systemName: "arrow.down.and.line.horizontal.and.arrow.up")
+                    .font(.system(size: 14))
+                    .foregroundColor(engine.currentTheme.accentPrimary.opacity(0.6))
+                Text("BOTTOM RACK EXPANSION BAY")
+                    .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                    .foregroundColor(.white)
+                Text("Drag any module here from wings, or use the menu above to dock a module in this space")
+                    .font(.system(size: 7, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.55))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.vertical, 14)
+            .background(Color.black.opacity(0.28))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(
+                        LinearGradient(
+                            colors: [engine.currentTheme.sectionOutline.opacity(0.6), engine.currentTheme.accentPrimary.opacity(0.3)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        style: StrokeStyle(lineWidth: 1.2, dash: [6, 4])
+                    )
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .frame(maxWidth: 894, maxHeight: .infinity)
+        .padding(8)
+        .background(Color.black.opacity(0.32))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(engine.currentTheme.sectionOutline.opacity(0.4), lineWidth: 1))
+        .onDrop(of: [.plainText], delegate: ZoneDropDelegate(targetZone: .bottomRack, engine: engine))
+    }
+
+    // ------------------------------------------------------------------------
+    // DYNAMIC MODULAR SYSTEM: PLACEMENT ANYWHERE, RESIZING & SPOTLIGHT
+    // ------------------------------------------------------------------------
+    private func moduleContentView(for module: StudioModuleID, isSpotlight: Bool = false) -> AnyView {
+        switch module {
+        case .midiRouter:
+            return AnyView(leftWingStudioPanel(isSpotlight: isSpotlight))
+        case .memorySlots:
+            return AnyView(leftWingMemorySlotsPanel(isSpotlight: isSpotlight))
+        case .customFXStudio:
+            return AnyView(rightWingStudioPanel(isSpotlight: isSpotlight))
+        case .reactiveKeyFX:
+            return AnyView(rightWingReactiveKeyFXPanel(isSpotlight: isSpotlight))
+        case .showControl:
+            return AnyView(showControlStudioPanel(isSpotlight: isSpotlight))
+        }
+    }
+
+    private func moduleHeaderControls(for module: StudioModuleID) -> some View {
+        HStack(spacing: 3) {
+            // Dynamic Size Preset Quick-Cycle Button
+            Button(action: {
+                engine.cycleModuleSizePreset(module)
+            }) {
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.up.and.down")
+                        .font(.system(size: 6.5, weight: .bold))
+                    Text(engine.moduleSizePresetLabel(module))
+                        .font(.system(size: 6, weight: .heavy, design: .monospaced))
+                }
+                .foregroundColor(engine.currentTheme.accentPrimary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2.5)
+                .background(engine.currentTheme.accentPrimary.opacity(0.18))
+                .clipShape(RoundedRectangle(cornerRadius: 3.5))
+            }
+            .buttonStyle(.plain)
+            .hoverGrow(1.08)
+            .help("Cycle Height: Compact (210) / Standard (340) / Tall (480)")
+
+            // Width Preset Quick-Cycle Button (For Bottom Rack)
+            if engine.currentZone(of: module) == .bottomRack {
+                Button(action: {
+                    engine.cycleModuleWidthPreset(module)
+                }) {
+                    HStack(spacing: 2) {
+                        Image(systemName: "arrow.left.and.right")
+                            .font(.system(size: 6.5, weight: .bold))
+                        Text(engine.moduleWidthPresetLabel(module))
+                            .font(.system(size: 6, weight: .heavy, design: .monospaced))
+                    }
+                    .foregroundColor(Color(red: 0.96, green: 0.76, blue: 0.18))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2.5)
+                    .background(Color(red: 0.96, green: 0.76, blue: 0.18).opacity(0.18))
+                    .clipShape(RoundedRectangle(cornerRadius: 3.5))
+                }
+                .buttonStyle(.plain)
+                .hoverGrow(1.08)
+                .help("Cycle Width in Rack: Compact / Half / Wide / Full Console")
+            }
+
+            // Placement Menu Button (Move anywhere there is space!)
+            Menu {
+                Section("PLACEMENT ZONE") {
+                    Button(action: { engine.moveModuleToZone(module, zone: .leftWing) }) {
+                        Label("Left Wing", systemImage: "sidebar.left")
+                    }
+                    Button(action: { engine.moveModuleToZone(module, zone: .rightWing) }) {
+                        Label("Right Wing", systemImage: "sidebar.right")
+                    }
+                    Button(action: { engine.moveModuleToZone(module, zone: .bottomRack) }) {
+                        Label("Bottom Console Rack", systemImage: "rectangle.bottomthird.inset.filled")
+                    }
+                    Divider()
+                    Button(action: { engine.popOutModuleToWindow(module) }) {
+                        Label("Pop Out into Floating Window", systemImage: "macwindow.badge.plus")
+                    }
+                    Button(action: { engine.toggleSpotlightModule(module) }) {
+                        Label("Center in Spotlight", systemImage: "arrow.up.left.and.arrow.down.right")
+                    }
+                }
+                Section("REORDER IN ZONE") {
+                    Button(action: { engine.moveModuleWithinZone(module, direction: -1) }) {
+                        Label("Move Up / Left", systemImage: "arrow.up")
+                    }
+                    Button(action: { engine.moveModuleWithinZone(module, direction: 1) }) {
+                        Label("Move Down / Right", systemImage: "arrow.down")
+                    }
+                }
+                Section("HEIGHT PRESETS") {
+                    Button("Compact (210 px)") { engine.setModuleHeight(module, height: 210, save: true) }
+                    Button("Standard (340 px)") { engine.setModuleHeight(module, height: 340, save: true) }
+                    Button("Tall (480 px)") { engine.setModuleHeight(module, height: 480, save: true) }
+                    Button("Reset to Default") { engine.resetModuleHeight(module) }
+                }
+                if engine.currentZone(of: module) == .bottomRack {
+                    Section("WIDTH PRESETS (BOTTOM RACK)") {
+                        Button("Compact (320 px)") { engine.setModuleWidth(module, width: 320, save: true) }
+                        Button("Half Rack (435 px)") { engine.setModuleWidth(module, width: 435, save: true) }
+                        Button("Wide (620 px)") { engine.setModuleWidth(module, width: 620, save: true) }
+                        Button("Full Console (894 px)") { engine.setModuleWidth(module, width: 894, save: true) }
+                    }
+                }
+            } label: {
+                Image(systemName: "square.split.bottomrightquarter")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundColor(Color(white: 0.85))
+                    .frame(width: 16, height: 16)
+                    .background(Color.white.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+            .menuStyle(.borderlessButton)
+            .hoverGrow(1.08)
+            .help("Move or Resize Module")
+
+            // Center Spotlight / Blur Background Toggle
+            Button(action: {
+                engine.toggleSpotlightModule(module)
+            }) {
+                Image(systemName: engine.spotlightModule == module ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundColor(engine.spotlightModule == module ? .black : engine.currentTheme.accentPrimary)
+                    .frame(width: 16, height: 16)
+                    .background(engine.spotlightModule == module ? engine.currentTheme.accentPrimary : Color.white.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+            .hoverGrow(1.08)
+            .help("Center Module on Screen with Blurred Background")
+
+            // Pop Out Into Standalone Floating Window
+            if standaloneModule == nil {
+                Button(action: {
+                    engine.popOutModuleToWindow(module)
+                }) {
+                    Image(systemName: "macwindow.badge.plus")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundColor(Color(white: 0.85))
+                        .frame(width: 16, height: 16)
+                        .background(Color.white.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .hoverGrow(1.08)
+                .help("Pop Out Module Into Its Own Window")
+            }
+        }
+    }
+
+    private func dynamicModuleContainer(for mod: StudioModuleID, in zone: ModuleZone) -> some View {
+        let isDetached = engine.detachedModules.contains(mod)
+        let jiggleAngle: Double = engine.isRearrangingModules ? (jigglePhase ? -1.1 : 1.1) : 0.0
+        let targetHeight = engine.moduleCustomHeights[mod] ?? mod.defaultSlotHeight
+
+        return VStack(spacing: 0) {
+            // If in Rearrange Mode, show the Quick Move / Zone Transfer pill bar above card
+            if engine.isRearrangingModules {
+                moduleRearrangeActionBar(for: mod, currentZone: zone)
+                    .padding(.bottom, 3)
+            }
+
+            if isDetached {
+                detachedModulePlaceholderCard(for: mod)
+            } else {
+                VStack(spacing: 0) {
+                    // Module Content (Internally scrollable so NOTHING ever cuts off!)
+                    moduleContentView(for: mod)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                    // Interactive Bottom Drag-to-Resize Handle Bar
+                    moduleResizeHandleBar(for: mod, currentHeight: targetHeight, zone: zone)
+                }
+                .frame(height: targetHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(
+                            engine.isRearrangingModules ? Color(red: 0.96, green: 0.76, blue: 0.18) : Color.clear,
+                            style: StrokeStyle(lineWidth: engine.isRearrangingModules ? 1.8 : 0, dash: [6, 4])
+                        )
+                )
+            }
+        }
+        .rotationEffect(.degrees(jiggleAngle))
+        .onDrag {
+            engine.draggingModule = mod
+            return NSItemProvider(object: mod.rawValue as NSString)
+        }
+        .onDrop(of: [.plainText], delegate: ModuleSlotDropDelegate(targetModule: mod, engine: engine))
+        .contextMenu {
+            moduleContextMenu(for: mod, zone: zone)
+        }
+    }
+
+    private func moduleResizeHandleBar(for mod: StudioModuleID, currentHeight: CGFloat, zone: ModuleZone) -> some View {
+        HStack(spacing: 4) {
+            Text("↕ RESIZE")
+                .font(.system(size: 5.5, weight: .heavy, design: .monospaced))
+                .foregroundColor(Color(white: 0.45))
+
+            Spacer()
+
+            Capsule()
+                .fill(Color.white.opacity(0.22))
+                .frame(width: 28, height: 3)
+
+            Spacer()
+
+            if zone == .bottomRack {
+                Button(action: {
+                    engine.cycleModuleWidthPreset(mod)
+                }) {
+                    Text("WIDTH: \(engine.moduleWidthPresetLabel(mod))")
+                        .font(.system(size: 5.5, weight: .heavy, design: .monospaced))
+                        .foregroundColor(Color(red: 0.96, green: 0.76, blue: 0.18))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 2))
+                }
+                .buttonStyle(.plain)
+                .help("Cycle width preset in Bottom Rack (Compact / Half / Wide / Full)")
+            }
+
+            Text("\(Int(currentHeight))PX")
+                .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                .foregroundColor(engine.currentTheme.accentPrimary.opacity(0.85))
+
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 6.5, weight: .bold))
+                .foregroundColor(engine.currentTheme.accentPrimary.opacity(0.8))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Color.black.opacity(0.75))
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { val in
+                    if resizingModule != mod {
+                        resizingModule = mod
+                        dragInitialHeight = currentHeight
+                    }
+                    let newH = max(160, min(650, dragInitialHeight + val.translation.height))
+                    engine.setModuleHeight(mod, height: newH, save: false)
+                }
+                .onEnded { val in
+                    let newH = max(160, min(650, dragInitialHeight + val.translation.height))
+                    engine.setModuleHeight(mod, height: newH, save: true)
+                    resizingModule = nil
+                }
+        )
+        .onTapGesture(count: 2) {
+            engine.cycleModuleSizePreset(mod)
+        }
+        .help("Drag vertically to dynamically resize module. Double-click to cycle presets (Compact / Standard / Tall).")
+    }
+
+    private func moduleRearrangeActionBar(for mod: StudioModuleID, currentZone: ModuleZone) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "hand.draw.fill")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundColor(Color(red: 0.96, green: 0.78, blue: 0.22))
+            Text("MOVE:")
+                .font(.system(size: 5.5, weight: .heavy, design: .monospaced))
+                .foregroundColor(Color(red: 0.96, green: 0.78, blue: 0.22))
+
+            Spacer(minLength: 2)
+
+            Button("⇦ LW") { engine.moveModuleToZone(mod, zone: .leftWing) }
+                .buttonStyle(.plain)
+                .font(.system(size: 5.5, weight: .heavy, design: .monospaced))
+                .padding(.horizontal, 3.5)
+                .padding(.vertical, 1.5)
+                .background(currentZone == .leftWing ? Color(red: 0.96, green: 0.76, blue: 0.18) : Color.white.opacity(0.12))
+                .foregroundColor(currentZone == .leftWing ? .black : .white)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+
+            Button("⇨ RW") { engine.moveModuleToZone(mod, zone: .rightWing) }
+                .buttonStyle(.plain)
+                .font(.system(size: 5.5, weight: .heavy, design: .monospaced))
+                .padding(.horizontal, 3.5)
+                .padding(.vertical, 1.5)
+                .background(currentZone == .rightWing ? Color(red: 0.96, green: 0.76, blue: 0.18) : Color.white.opacity(0.12))
+                .foregroundColor(currentZone == .rightWing ? .black : .white)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+
+            Button("⇩ RACK") { engine.moveModuleToZone(mod, zone: .bottomRack) }
+                .buttonStyle(.plain)
+                .font(.system(size: 5.5, weight: .heavy, design: .monospaced))
+                .padding(.horizontal, 3.5)
+                .padding(.vertical, 1.5)
+                .background(currentZone == .bottomRack ? Color(red: 0.96, green: 0.76, blue: 0.18) : Color.white.opacity(0.12))
+                .foregroundColor(currentZone == .bottomRack ? .black : .white)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+
+            Button(action: { engine.popOutModuleToWindow(mod) }) {
+                Image(systemName: "macwindow.badge.plus")
+                    .font(.system(size: 6.5, weight: .bold))
+                    .padding(.horizontal, 3.5)
+                    .padding(.vertical, 1.5)
+                    .background(engine.currentTheme.accentPrimary.opacity(0.28))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2.5)
+        .background(Color.black.opacity(0.78))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(red: 0.96, green: 0.76, blue: 0.18), lineWidth: 0.8))
+    }
+
+    private func dropTargetCard(forZone zone: ModuleZone) -> some View {
+        Button(action: {
+            if let dragged = engine.draggingModule {
+                engine.moveModuleToZone(dragged, zone: zone)
+            }
+        }) {
+            VStack(spacing: 4) {
+                Image(systemName: "plus.circle.dashed")
+                    .font(.system(size: 14))
+                    .foregroundColor(Color(red: 0.96, green: 0.76, blue: 0.18).opacity(0.7))
+                Text("+ PLACE MODULE IN \(zone.displayName)")
+                    .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                    .foregroundColor(Color(red: 0.96, green: 0.76, blue: 0.18))
+            }
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity)
+            .background(Color.black.opacity(0.28))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1.2, dash: [5, 4]))
+                    .foregroundColor(Color(red: 0.96, green: 0.76, blue: 0.18).opacity(0.65))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .onDrop(of: [.plainText], delegate: ZoneDropDelegate(targetZone: zone, engine: engine))
+    }
+
+    private func detachedModulePlaceholderCard(for mod: StudioModuleID) -> some View {
+        VStack(spacing: 8) {
+            HStack {
+                Image(systemName: mod.iconName)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                Text(mod.rawValue)
+                    .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                    .foregroundColor(engine.currentTheme.headerText)
+                Spacer()
+                Text("POPPED OUT")
+                    .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(engine.currentTheme.accentPrimary.opacity(0.22))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+
+            VStack(spacing: 6) {
+                Image(systemName: "macwindow.on.rectangle")
+                    .font(.system(size: 20))
+                    .foregroundColor(engine.currentTheme.accentPrimary.opacity(0.85))
+                Text("ACTIVE IN FLOATING WINDOW")
+                    .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                    .foregroundColor(.white)
+
+                HStack(spacing: 6) {
+                    Button(action: {
+                        engine.popOutModuleToWindow(mod)
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "macwindow")
+                            Text("FOCUS WINDOW")
+                        }
+                        .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.12))
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        engine.dockModuleBackFromWindow(mod)
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.down.left.square.fill")
+                            Text("DOCK BACK HERE")
+                        }
+                        .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(engine.currentTheme.accentPrimary)
+                        .foregroundColor(.black)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.42))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1.2, dash: [5, 4]))
+                .foregroundColor(engine.currentTheme.accentPrimary.opacity(0.65))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    @ViewBuilder
+    private func moduleContextMenu(for mod: StudioModuleID, zone: ModuleZone) -> some View {
+        Menu("Move Module To...") {
+            Button("Left Wing") { engine.moveModuleToZone(mod, zone: .leftWing) }
+            Button("Right Wing") { engine.moveModuleToZone(mod, zone: .rightWing) }
+            Button("Bottom Console Rack") { engine.moveModuleToZone(mod, zone: .bottomRack) }
+            Button("Floating Window") { engine.popOutModuleToWindow(mod) }
+        }
+        Menu("Module Height...") {
+            Button("Compact (210 px)") { engine.setModuleHeight(mod, height: 210, save: true) }
+            Button("Standard (340 px)") { engine.setModuleHeight(mod, height: 340, save: true) }
+            Button("Tall (480 px)") { engine.setModuleHeight(mod, height: 480, save: true) }
+            Button("Reset to Default") { engine.resetModuleHeight(mod) }
+        }
+        Divider()
+        Button(action: { engine.toggleSpotlightModule(mod) }) {
+            Label("Center Module on Screen (Blur Background)", systemImage: "arrow.up.left.and.arrow.down.right")
+        }
+        Button(action: { engine.popOutModuleToWindow(mod) }) {
+            Label("Open Module in Own Window", systemImage: "macwindow.badge.plus")
+        }
+        Divider()
+        Button(action: { engine.toggleRearrangeModulesMode() }) {
+            Label(engine.isRearrangingModules ? "Lock Module Layout" : "Rearrange Modules & Spaces", systemImage: "square.grid.2x2.fill")
+        }
+        Button(action: { engine.resetModuleLayout() }) {
+            Label("Reset Module Positions to Default", systemImage: "arrow.counterclockwise")
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // CUSTOM SOUND STUDIO OVERLAY (UPLOAD USER AUDIO FILES FOR ANY EVENT)
+    // ------------------------------------------------------------------------
+    private var customSoundStudioOverlay: some View {
+        let _ = engine.customSoundUpdateToken
+        return ZStack {
+            Color.black.opacity(0.58)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                        engine.showCustomSoundStudio = false
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: 12) {
+                // Header
+                HStack(spacing: 10) {
+                    Image(systemName: "waveform.badge.plus")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(engine.currentTheme.accentPrimary)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("CUSTOM SOUND STUDIO // UPLOAD YOUR OWN AUDIO")
+                            .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                            .foregroundColor(.white)
+                        Text("Upload .WAV, .MP3, .AIFF, or .M4A sounds for any BitchBoy hardware or UI event")
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color(white: 0.68))
+                    }
+
+                    Spacer()
+
+                    Button(action: {
+                        engine.clearAllCustomSoundFiles()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.counterclockwise")
+                            Text("RESET ALL")
+                        }
+                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.red.opacity(0.22))
+                        .foregroundColor(Color(red: 1.0, green: 0.6, blue: 0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                            engine.showCustomSoundStudio = false
+                        }
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "xmark.circle.fill")
+                            Text("DONE")
+                        }
+                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(engine.currentTheme.accentPrimary)
+                        .foregroundColor(.black)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Active Sound Pack Selector Row
+                HStack(spacing: 6) {
+                    Text("ACTIVE SOUND MODE:")
+                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        .foregroundColor(engine.currentTheme.headerText)
+
+                    ForEach(SoundPack.allCases) { pack in
+                        Button(action: {
+                            engine.setSoundPack(pack)
+                        }) {
+                            Text(pack.rawValue)
+                                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(engine.soundPack == pack ? engine.currentTheme.accentPrimary : Color.white.opacity(0.1))
+                                .foregroundColor(engine.soundPack == pack ? .black : .white)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.45))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                // 6 Sound Event Slots
+                VStack(spacing: 6) {
+                    ForEach(SoundEffect.allCases) { sfx in
+                        let uploadedName = CustomSoundBank.shared.fileName(for: sfx)
+                        HStack(spacing: 10) {
+                            Image(systemName: sfx.iconName)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(uploadedName != nil ? engine.currentTheme.accentPrimary : Color(white: 0.6))
+                                .frame(width: 24, height: 24)
+                                .background(Color.white.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(sfx.displayName)
+                                    .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                                    .foregroundColor(.white)
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(uploadedName != nil ? Color.green : Color.gray)
+                                        .frame(width: 5, height: 5)
+                                    Text(uploadedName != nil ? "CUSTOM FILE: \(uploadedName!)" : "Built-in Synth Default")
+                                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                                        .foregroundColor(uploadedName != nil ? Color(red: 0.35, green: 0.98, blue: 0.75) : Color(white: 0.55))
+                                        .lineLimit(1)
+                                }
+                            }
+
+                            Spacer()
+
+                            Button(action: {
+                                sfx.play(with: uploadedName != nil ? .customUser : engine.soundPack)
+                            }) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "play.fill")
+                                    Text("PREVIEW")
+                                }
+                                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.white.opacity(0.12))
+                                .foregroundColor(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(action: {
+                                engine.uploadCustomSoundFile(for: sfx)
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "folder.fill.badge.plus")
+                                    Text(uploadedName != nil ? "CHANGE AUDIO..." : "UPLOAD AUDIO...")
+                                }
+                                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(engine.currentTheme.accentPrimary)
+                                .foregroundColor(.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                            }
+                            .buttonStyle(.plain)
+
+                            if uploadedName != nil {
+                                Button(action: {
+                                    engine.clearCustomSoundFile(for: sfx)
+                                }) {
+                                    Image(systemName: "trash.fill")
+                                        .font(.system(size: 8))
+                                        .padding(5)
+                                        .background(Color.red.opacity(0.25))
+                                        .foregroundColor(Color(red: 1.0, green: 0.55, blue: 0.55))
+                                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(uploadedName != nil ? engine.currentTheme.accentPrimary.opacity(0.12) : Color.black.opacity(0.48))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(uploadedName != nil ? engine.currentTheme.accentPrimary.opacity(0.6) : Color.white.opacity(0.1), lineWidth: 1)
+                        )
+                    }
+                }
+            }
+            .padding(18)
+            .frame(width: 560)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(red: 0.03, green: 0.14, blue: 0.12).opacity(0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(engine.currentTheme.accentPrimary, lineWidth: 1.8)
+            )
+            .shadow(color: engine.currentTheme.accentPrimary.opacity(0.55), radius: 26, x: 0, y: 8)
+            .shadow(color: Color.black.opacity(0.9), radius: 34, x: 0, y: 14)
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // CUSTOM THEME STUDIO OVERLAY (GLOW CYBER CHASSIS BUILDER)
+    // ------------------------------------------------------------------------
+    private var customThemeStudioOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.62)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                        engine.showCustomThemeStudio = false
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: 14) {
+                // Header
+                HStack(spacing: 10) {
+                    Image(systemName: "paintpalette.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(engine.currentTheme.accentPrimary)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("CUSTOM THEME STUDIO // GLOW CYBER CHASSIS BUILDER")
+                            .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                            .foregroundColor(.white)
+                        Text("Craft custom glowing PCB, bezel gradients, and neon silkscreen aesthetics")
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color(white: 0.68))
+                    }
+
+                    Spacer()
+
+                    Button(action: {
+                        engine.createNewCustomTheme()
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("NEW THEME")
+                        }
+                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.12))
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        engine.duplicateActiveCustomTheme()
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.on.doc.fill")
+                            Text("DUPLICATE")
+                        }
+                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.12))
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+
+                    if engine.customThemes.count > 1 {
+                        Button(action: {
+                            engine.deleteActiveCustomTheme()
+                        }) {
+                            Image(systemName: "trash.fill")
+                                .font(.system(size: 8.5))
+                                .padding(5)
+                                .background(Color.red.opacity(0.25))
+                                .foregroundColor(Color(red: 1.0, green: 0.55, blue: 0.55))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button(action: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                            engine.showCustomThemeStudio = false
+                        }
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "xmark.circle.fill")
+                            Text("DONE")
+                        }
+                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(engine.currentTheme.accentPrimary)
+                        .foregroundColor(.black)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Theme Name & Starter Presets Bar
+                HStack(spacing: 10) {
+                    HStack(spacing: 6) {
+                        Text("THEME NAME:")
+                            .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.currentTheme.headerText)
+
+                        TextField("Theme Name", text: Binding(
+                            get: { engine.activeCustomTheme.name },
+                            set: { engine.updateCustomThemeName($0) }
+                        ))
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.6))
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(engine.currentTheme.accentPrimary.opacity(0.4), lineWidth: 1))
+                        .frame(width: 175)
+                    }
+
+                    Spacer()
+
+                    Text("STARTER PRESETS:")
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+
+                    HStack(spacing: 4) {
+                        Button("NEO TOKYO") { engine.loadPresetToActiveTheme(.neoTokyo) }
+                        Button("ACID OVERDRIVE") { engine.loadPresetToActiveTheme(.acidLime) }
+                        Button("CYBER INFERNO") { engine.loadPresetToActiveTheme(.inferno) }
+                        Button("VOID ICE") { engine.loadPresetToActiveTheme(.deepIce) }
+                    }
+                    .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                    .buttonStyle(.plain)
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.45))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                // Live Mini Hardware Preview
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("LIVE HARDWARE CHASSIS PREVIEW:")
+                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                        .foregroundColor(engine.currentTheme.headerText)
+
+                    ZStack {
+                        // Outer bezel
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(
+                                LinearGradient(
+                                    colors: engine.activeCustomTheme.outerBezelColors,
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(height: 70)
+                            .shadow(color: engine.activeCustomTheme.accentPrimary.opacity(0.4), radius: 8)
+
+                        // PCB
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(engine.activeCustomTheme.pcbBackground)
+                            .padding(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(engine.activeCustomTheme.sectionOutline, lineWidth: 1.2)
+                                    .padding(6)
+                            )
+
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("BITCHBOY V1")
+                                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                                    .foregroundColor(engine.activeCustomTheme.accentPrimary)
+                                    .shadow(color: engine.activeCustomTheme.accentPrimary.opacity(0.9), radius: 5)
+                                Text("CUSTOM SILKSCREEN GLOW")
+                                    .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                                    .foregroundColor(engine.activeCustomTheme.headerText)
+                            }
+                            .padding(.leading, 18)
+
+                            Spacer()
+
+                            // Mock LED Key Grid
+                            HStack(spacing: 4) {
+                                ForEach(0..<8, id: \.self) { i in
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(i % 2 == 0 ? engine.activeCustomTheme.accentPrimary : Color(white: 0.18))
+                                        .frame(width: 14, height: 14)
+                                        .shadow(color: i % 2 == 0 ? engine.activeCustomTheme.accentPrimary.opacity(0.8) : .clear, radius: 4)
+                                }
+                            }
+                            .padding(.trailing, 18)
+                        }
+                    }
+                }
+
+                // 6 Glow Color Pickers Grid
+                VStack(spacing: 8) {
+                    HStack(spacing: 10) {
+                        themeColorPickerCard(
+                            title: "PCB INNER BACKPLANE",
+                            subtitle: "Main circuit board surface",
+                            hex: Binding(
+                                get: { engine.activeCustomTheme.pcbHex },
+                                set: { engine.activeCustomTheme.pcbHex = $0; engine.saveAndApplyActiveCustomTheme() }
+                            )
+                        )
+                        themeColorPickerCard(
+                            title: "BEZEL GRADIENT START",
+                            subtitle: "Outer chassis metal rim",
+                            hex: Binding(
+                                get: { engine.activeCustomTheme.bezelStartHex },
+                                set: { engine.activeCustomTheme.bezelStartHex = $0; engine.saveAndApplyActiveCustomTheme() }
+                            )
+                        )
+                        themeColorPickerCard(
+                            title: "BEZEL GRADIENT END",
+                            subtitle: "Outer chassis bottom shadow",
+                            hex: Binding(
+                                get: { engine.activeCustomTheme.bezelEndHex },
+                                set: { engine.activeCustomTheme.bezelEndHex = $0; engine.saveAndApplyActiveCustomTheme() }
+                            )
+                        )
+                    }
+
+                    HStack(spacing: 10) {
+                        themeColorPickerCard(
+                            title: "NEON ACCENT & GLOW",
+                            subtitle: "Primary buttons, active status, badges",
+                            hex: Binding(
+                                get: { engine.activeCustomTheme.accentGlowHex },
+                                set: { engine.activeCustomTheme.accentGlowHex = $0; engine.saveAndApplyActiveCustomTheme() }
+                            )
+                        )
+                        themeColorPickerCard(
+                            title: "SECTION OUTLINES",
+                            subtitle: "Module frames & silkscreen dividers",
+                            hex: Binding(
+                                get: { engine.activeCustomTheme.outlineHex },
+                                set: { engine.activeCustomTheme.outlineHex = $0; engine.saveAndApplyActiveCustomTheme() }
+                            )
+                        )
+                        themeColorPickerCard(
+                            title: "SILKSCREEN HEADERS",
+                            subtitle: "Labels, legends & subheaders",
+                            hex: Binding(
+                                get: { engine.activeCustomTheme.headerTextHex },
+                                set: { engine.activeCustomTheme.headerTextHex = $0; engine.saveAndApplyActiveCustomTheme() }
+                            )
+                        )
+                    }
+                }
+            }
+            .padding(18)
+            .frame(width: 590)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(red: 0.03, green: 0.14, blue: 0.12).opacity(0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(engine.currentTheme.accentPrimary, lineWidth: 1.8)
+            )
+            .shadow(color: engine.currentTheme.accentPrimary.opacity(0.55), radius: 26, x: 0, y: 8)
+            .shadow(color: Color.black.opacity(0.9), radius: 34, x: 0, y: 14)
+        }
+    }
+
+    private func themeColorPickerCard(title: String, subtitle: String, hex: Binding<String>) -> some View {
+        let col = Color(hex: hex.wrappedValue)
+        return HStack(spacing: 8) {
+            ColorPicker("", selection: Binding<Color>(
+                get: { col },
+                set: { hex.wrappedValue = $0.toHex() }
+            ), supportsOpacity: false)
+            .labelsHidden()
+            .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                Text(hex.wrappedValue)
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color.black.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(col.opacity(0.65), lineWidth: 1.2))
+    }
+
+    // ------------------------------------------------------------------------
+    // GITHUB AUTO-UPDATER OVERLAY (Centered with Blurred Console Behind It)
+    // ------------------------------------------------------------------------
+    private var updateSheetOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.65)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if !engine.isDownloadingUpdate {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                            engine.showUpdateModal = false
+                        }
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: 14) {
+                // Header Bar
+                HStack(spacing: 10) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(Color(red: 0.98, green: 0.72, blue: 0.22))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("BITCHMANAGER GITHUB AUTO-UPDATER")
+                                .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                                .foregroundColor(.white)
+
+                            if let rel = engine.latestRelease {
+                                Text("\(rel.tagName)")
+                                    .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color(red: 0.98, green: 0.72, blue: 0.22))
+                                    .foregroundColor(.black)
+                                    .clipShape(Capsule())
+                            }
+                        }
+
+                        Text("Installed Version: v\(engine.currentAppVersion) • Repository: kookly/BitchManager")
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color(white: 0.68))
+                    }
+
+                    Spacer()
+
+                    if !engine.isDownloadingUpdate {
+                        Button(action: {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                                engine.showUpdateModal = false
+                            }
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundColor(Color.white.opacity(0.75))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                // Release Title & Date Box
+                if let release = engine.latestRelease {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(release.name ?? release.tagName)
+                                .font(.system(size: 9.5, weight: .heavy, design: .monospaced))
+                                .foregroundColor(engine.currentTheme.accentPrimary)
+                            Spacer()
+                            Text(release.formattedPublishDate)
+                                .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                                .foregroundColor(Color(white: 0.6))
+                        }
+
+                        if let asset = release.bestAsset {
+                            HStack(spacing: 4) {
+                                Image(systemName: "shippingbox.fill")
+                                    .font(.system(size: 7.5))
+                                Text("Asset: \(asset.name) (\(asset.formattedSize))")
+                                    .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                                    .foregroundColor(Color(white: 0.7))
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    // Release Notes Body
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("RELEASE NOTES & CHANGELOG:")
+                            .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.currentTheme.headerText)
+
+                        ScrollView {
+                            Text(release.body ?? "No release notes provided for this version.")
+                                .font(.system(size: 8, design: .monospaced))
+                                .foregroundColor(Color(white: 0.88))
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(height: 120)
+                        .background(Color.black.opacity(0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(engine.currentTheme.accentPrimary.opacity(0.3), lineWidth: 1))
+                    }
+                }
+
+                // Download Progress / Status Bar
+                if engine.isDownloadingUpdate {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(engine.updateStatusMessage)
+                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                .foregroundColor(engine.currentTheme.accentPrimary)
+                            Spacer()
+                            Text("\(Int(engine.updateDownloadProgress * 100))%")
+                                .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                                .foregroundColor(.white)
+                        }
+
+                        GeometryReader { pGeo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Color.white.opacity(0.12))
+                                    .frame(height: 6)
+
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [Color(red: 0.98, green: 0.72, blue: 0.22), engine.currentTheme.accentPrimary],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                                    .frame(width: max(0, pGeo.size.width * CGFloat(engine.updateDownloadProgress)), height: 6)
+                                    .shadow(color: engine.currentTheme.accentPrimary.opacity(0.8), radius: 4)
+                            }
+                        }
+                        .frame(height: 6)
+                    }
+                    .padding(8)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
+                // Error Display (if any)
+                if let err = engine.updateError {
+                    Text(err)
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(red: 1.0, green: 0.45, blue: 0.45))
+                        .padding(6)
+                        .background(Color.red.opacity(0.2))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                // Action Buttons Bar
+                HStack(spacing: 8) {
+                    if !engine.isDownloadingUpdate {
+                        Button(action: {
+                            engine.installUpdateFromGitHub()
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                Text("⚡ UPDATE & RESTART NOW")
+                            }
+                            .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color(red: 0.98, green: 0.72, blue: 0.22), Color(red: 0.95, green: 0.42, blue: 0.15)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .foregroundColor(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .shadow(color: Color.orange.opacity(0.6), radius: 6)
+                        }
+                        .buttonStyle(.plain)
+
+                        if let rel = engine.latestRelease, let url = URL(string: rel.htmlUrl) {
+                            Button(action: {
+                                NSWorkspace.shared.open(url)
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "safari")
+                                    Text("VIEW ON GITHUB")
+                                }
+                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.12))
+                                .foregroundColor(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                                engine.showUpdateModal = false
+                            }
+                        }) {
+                            Text("LATER")
+                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.08))
+                                .foregroundColor(Color(white: 0.7))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Spacer()
+                        Button(action: {
+                            engine.cancelUpdateDownload()
+                        }) {
+                            Text("CANCEL DOWNLOAD")
+                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.red.opacity(0.25))
+                                .foregroundColor(Color(red: 1.0, green: 0.6, blue: 0.6))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(18)
+            .frame(width: 520)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(red: 0.03, green: 0.14, blue: 0.12).opacity(0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(engine.currentTheme.accentPrimary, lineWidth: 1.8)
+            )
+            .shadow(color: engine.currentTheme.accentPrimary.opacity(0.55), radius: 26, x: 0, y: 8)
+            .shadow(color: Color.black.opacity(0.9), radius: 34, x: 0, y: 14)
         }
     }
 
     // ------------------------------------------------------------------------
     // LEFT WING (RED BOX #1): MIDI INPUT -> ANY PROGRAM / OUTPUT ROUTER & SCOPE
     // ------------------------------------------------------------------------
-    private var leftWingStudioPanel: some View {
+    private func leftWingStudioPanel(isSpotlight: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Wing Header & Mode Switcher
-            HStack {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(engine.currentTheme.accentPrimary)
-                Text("MIDI ROUTER // OUT")
-                    .font(.system(size: 9, weight: .heavy, design: .monospaced))
-                    .foregroundColor(engine.currentTheme.headerText)
-                Spacer()
-                Circle()
-                    .fill(engine.midiThruEnabled ? Color.green : Color.orange)
-                    .frame(width: 7, height: 7)
-                Text(engine.midiThruEnabled ? "THRU ON" : "MUTED")
-                    .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
-                    .foregroundColor(engine.midiThruEnabled ? Color.green : Color.orange)
+            if !isSpotlight {
+                // Wing Header & Mode Switcher (CLICK TOP BAR TO CENTER ON SCREEN & BLUR BACKGROUND!)
+                HStack(spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(engine.currentTheme.accentPrimary)
+                        Text("MIDI ROUTER // OUT")
+                            .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.currentTheme.headerText)
+                        Spacer(minLength: 2)
+                        Circle()
+                            .fill(engine.midiThruEnabled ? Color.green : Color.orange)
+                            .frame(width: 6, height: 6)
+                        Text(engine.midiThruEnabled ? "THRU ON" : "MUTED")
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.midiThruEnabled ? Color.green : Color.orange)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        engine.toggleSpotlightModule(.midiRouter)
+                    }
+
+                    moduleHeaderControls(for: .midiRouter)
+                }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 4)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
             }
 
-            // 3-Tab Switcher
-            HStack(spacing: 4) {
-                wingTabButton(title: "MIDI ROUTER", active: engine.leftWingTab == "ROUTER") {
+            // Left Wing Tabs: ROUTER, SCOPE, MACROS
+            HStack(spacing: 3) {
+                wingTabButton(title: "ROUTER", active: engine.leftWingTab == "ROUTER" || engine.leftWingTab == "SHOWCONTROL") {
                     engine.leftWingTab = "ROUTER"
                 }
-                wingTabButton(title: "20-CC SCOPE", active: engine.leftWingTab == "TELEMETRY") {
+                wingTabButton(title: "SCOPE", active: engine.leftWingTab == "TELEMETRY") {
                     engine.leftWingTab = "TELEMETRY"
                 }
                 wingTabButton(title: "MACROS", active: engine.leftWingTab == "MACROS") {
@@ -3603,19 +8714,23 @@ struct ContentView: View {
                 }
             }
 
-            if engine.leftWingTab == "ROUTER" {
-                leftWingMIDIRouterContent
-            } else if engine.leftWingTab == "TELEMETRY" {
-                leftWingTelemetryScopeContent
-            } else {
-                leftWingMacrosContent
+            ScrollView([.vertical], showsIndicators: true) {
+                if engine.leftWingTab == "TELEMETRY" {
+                    leftWingTelemetryScopeContent
+                } else if engine.leftWingTab == "MACROS" {
+                    leftWingMacrosContent
+                } else {
+                    leftWingMIDIRouterContent
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(10)
-        .background(Color.black.opacity(0.42))
+        .background(isSpotlight ? Color.clear : Color.black.opacity(0.42))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(engine.currentTheme.sectionOutline.opacity(0.75), lineWidth: 1.2)
+                .stroke(isSpotlight ? Color.clear : engine.currentTheme.sectionOutline.opacity(0.75), lineWidth: 1.2)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
@@ -3722,21 +8837,63 @@ struct ContentView: View {
                 .background(Color.black.opacity(0.45))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                Button(action: {
-                    engine.openAudioMIDISetupApp()
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "slider.horizontal.below.rectangle")
-                        Text("OPEN MACOS AUDIO MIDI / IAC")
+                HStack(spacing: 4) {
+                    Button(action: {
+                        engine.openAudioMIDISetupApp()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "slider.horizontal.below.rectangle")
+                            Text("AUDIO MIDI SETUP")
+                        }
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.08))
+                        .foregroundColor(Color(white: 0.85))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
                     }
-                    .font(.system(size: 7, weight: .bold, design: .monospaced))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.08))
-                    .foregroundColor(Color(white: 0.85))
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .buttonStyle(.plain)
+
+                    Menu {
+                        Section("Set Custom Image for 'BitchBoy' in macOS MIDI Studio") {
+                            Button(action: {
+                                engine.applyBitchBoyMIDIStudioIcon(style: "MASCOT", silent: false)
+                            }) {
+                                Label("Apply BitchBoy Mascot Icon to MIDI Studio", systemImage: "person.crop.square.fill")
+                            }
+                            Button(action: {
+                                engine.applyBitchBoyMIDIStudioIcon(style: "BADGE", silent: false)
+                            }) {
+                                Label("Apply BitchBoy Badge Icon to MIDI Studio", systemImage: "app.badge.fill")
+                            }
+                            Button(action: {
+                                engine.applyBitchBoyMIDIStudioIcon(style: "LOGO", silent: false)
+                            }) {
+                                Label("Apply BitchBoy Word Logo to MIDI Studio", systemImage: "textformat")
+                            }
+                            Divider()
+                            Button(action: {
+                                engine.chooseCustomMIDIStudioIconFromDisk()
+                            }) {
+                                Label("Choose Any Custom Image File (.png / .jpg / .icns)...", systemImage: "folder.badge.plus")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "photo.badge.checkmark")
+                                .font(.system(size: 7))
+                            Text("MIDI STUDIO ICON")
+                                .font(.system(size: 6, weight: .heavy, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                        .background(engine.currentTheme.accentPrimary.opacity(0.22))
+                        .foregroundColor(engine.currentTheme.accentPrimary)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
 
             // 3. Channel Remapper, Transpose & Velocity Curve
@@ -4010,17 +9167,17 @@ struct ContentView: View {
                     for i in 61..<69 { engine.setControlLiveValue(index: i, value: 64) }
                 }
                 macroTriggerPad(title: "PARTY SPARK LEDS", icon: "sparkles") {
-                    let pal: [UInt8] = [5, 14, 24, 38, 52, 68, 84, 98, 112, 127]
+                    let pal: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 3]
                     for i in 0..<49 {
-                        let v = pal.randomElement() ?? 68
+                        let v = pal.randomElement() ?? 78
                         engine.controls[i].idleVelocity = v
                         engine.controls[i].currentLED = v
                         engine.sendNoteOn(note: engine.controls[i].number, velocity: v)
                     }
                     engine.saveCurrentSlot()
                 }
-                macroTriggerPad(title: "ALL 49 LEDS MAX", icon: "sun.max.fill") {
-                    engine.setZoneLEDs(range: 0..<49, velocity: 127)
+                macroTriggerPad(title: "ALL 49 LEDS WHITE", icon: "sun.max.fill") {
+                    engine.setZoneLEDs(range: 0..<49, velocity: 3)
                 }
                 macroTriggerPad(title: "BLACKOUT ALL 49", icon: "moon.fill") {
                     engine.blackoutPanic()
@@ -4036,35 +9193,1239 @@ struct ContentView: View {
     }
 
     // ------------------------------------------------------------------------
+    // SHOW CONTROL PROTOCOL STUDIO (SLOT 0 // RED BOX #1)
+    // Control external show software (QLab, Resolume, grandMA, ETC EOS, TouchDesigner)
+    // ------------------------------------------------------------------------
+    private func showControlStudioPanel(isSpotlight: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if !isSpotlight {
+                // Header (CLICK TOP BAR TO CENTER ON SCREEN & BLUR BACKGROUND!)
+                HStack(spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(engine.currentTheme.accentPrimary)
+                        Text("SHOW CONTROL // OSC STUDIO")
+                            .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.currentTheme.headerText)
+                        Spacer(minLength: 2)
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                        Text("LIVE")
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .foregroundColor(Color.green)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        engine.toggleSpotlightModule(.showControl)
+                    }
+
+                    moduleHeaderControls(for: .showControl)
+                }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 4)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+
+            // Sub-Tab Switcher: OSC STUDIO & HARDWARE FEEDBACK
+            HStack(spacing: 3) {
+                wingTabButton(title: "OSC STUDIO", active: engine.showControlSubTab != "FEEDBACK") {
+                    engine.showControlSubTab = "OSC"
+                }
+                wingTabButton(title: "FEEDBACK", active: engine.showControlSubTab == "FEEDBACK") {
+                    engine.showControlSubTab = "FEEDBACK"
+                }
+            }
+
+            ScrollView([.vertical], showsIndicators: true) {
+                if engine.showControlSubTab == "FEEDBACK" {
+                    showControlFeedbackContent
+                } else {
+                    showControlUnifiedOSCContent
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(10)
+        .background(isSpotlight ? Color.clear : Color.black.opacity(0.42))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isSpotlight ? Color.clear : engine.currentTheme.sectionOutline.opacity(0.75), lineWidth: 1.2)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var showControlMSCContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Virtual Destination Status Box (Matching QLab Screenshot)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundColor(.green)
+                        .font(.system(size: 9))
+                    Text("Patch 1 - BitchBoy (BLOCK SYSTEM)")
+                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        .foregroundColor(.white)
+                    Spacer()
+                    Text("DEV: \(engine.mscDeviceID == 127 ? "ALL" : "\(engine.mscDeviceID)")")
+                        .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                        .foregroundColor(engine.currentTheme.accentPrimary)
+                }
+
+                Text("CoreMIDI destination online • Auto-discovered by QLab, EOS, and GrandMA")
+                    .font(.system(size: 6.8, design: .monospaced))
+                    .foregroundColor(Color(white: 0.6))
+
+                Toggle(isOn: $engine.mscAutoTriggerOnInbound) {
+                    Text("Auto-Trigger Presets on Inbound MSC (GO / STOP / LOAD)")
+                        .font(.system(size: 7.2, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.85))
+                }
+                .toggleStyle(.checkbox)
+                .padding(.top, 2)
+            }
+            .padding(6)
+            .background(Color(red: 0.04, green: 0.14, blue: 0.16).opacity(0.85))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.cyan.opacity(0.4), lineWidth: 1))
+
+            // MSC Transmitter Parameters
+            VStack(alignment: .leading, spacing: 4) {
+                Text("TRANSMIT MSC BROADCAST:")
+                    .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                    .foregroundColor(engine.currentTheme.headerText)
+
+                HStack(spacing: 6) {
+                    // Device ID
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("DEVICE ID:")
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.6))
+                        Picker("", selection: $engine.mscDeviceID) {
+                            Text("1 (Default)").tag(UInt8(1))
+                            ForEach(0..<16) { id in
+                                if id != 1 {
+                                    Text("\(id)").tag(UInt8(id))
+                                }
+                            }
+                            Text("127 (All Broadcast)").tag(UInt8(127))
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .scaleEffect(0.82, anchor: .leading)
+                    }
+
+                    // Format
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("FORMAT:")
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.6))
+                        Picker("", selection: $engine.mscCommandFormat) {
+                            ForEach(MSCCommandFormat.allCases) { fmt in
+                                Text(fmt.label).tag(fmt)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .scaleEffect(0.82, anchor: .leading)
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    // Cue Number
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("CUE #:")
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.6))
+                        TextField("e.g. 1.0", text: $engine.mscCueNumber)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+
+                    // Cue List
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("CUE LIST (OPTIONAL):")
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.6))
+                        TextField("e.g. Main", text: $engine.mscCueList)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+
+                // Transport Command Buttons Grid
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                    mscTransportButton(title: "▶️ GO", color: .green) {
+                        engine.sendMSCBroadcast(command: .go, cue: engine.mscCueNumber, cueList: engine.mscCueList, deviceID: engine.mscDeviceID, format: engine.mscCommandFormat)
+                    }
+                    mscTransportButton(title: "⏹️ STOP", color: .red) {
+                        engine.sendMSCBroadcast(command: .stop, cue: engine.mscCueNumber, cueList: engine.mscCueList, deviceID: engine.mscDeviceID, format: engine.mscCommandFormat)
+                    }
+                    mscTransportButton(title: "⏯️ RESUME", color: .cyan) {
+                        engine.sendMSCBroadcast(command: .resume, cue: engine.mscCueNumber, cueList: engine.mscCueList, deviceID: engine.mscDeviceID, format: engine.mscCommandFormat)
+                    }
+                    mscTransportButton(title: "🔄 RESET", color: .yellow) {
+                        engine.sendMSCBroadcast(command: .reset, cue: engine.mscCueNumber, cueList: engine.mscCueList, deviceID: engine.mscDeviceID, format: engine.mscCommandFormat)
+                    }
+                    mscTransportButton(title: "🚨 PANIC", color: .orange) {
+                        engine.sendMSCBroadcast(command: .allOff, cue: "", cueList: "", deviceID: engine.mscDeviceID, format: engine.mscCommandFormat)
+                    }
+                    mscTransportButton(title: "🔥 FIRE", color: .purple) {
+                        engine.sendMSCBroadcast(command: .fire, cue: engine.mscCueNumber, cueList: engine.mscCueList, deviceID: engine.mscDeviceID, format: engine.mscCommandFormat)
+                    }
+                }
+                .padding(.top, 2)
+            }
+            .padding(6)
+            .background(Color.black.opacity(0.45))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            // Live Inbound/Outbound MSC Log Inspector
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text("MSC PACKET MONITOR (TX / RX):")
+                        .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                        .foregroundColor(Color(white: 0.7))
+                    Spacer()
+                    Button("CLEAR") {
+                        engine.clearMSCLogHistory()
+                    }
+                    .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.6))
+                    .buttonStyle(.plain)
+                }
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if engine.mscLogHistory.isEmpty {
+                            Text("Ready. Listening on 'BitchBoy (BLOCK SYSTEM)' and transmitting on GO / STOP.")
+                                .font(.system(size: 6.8, design: .monospaced))
+                                .foregroundColor(Color(white: 0.5))
+                                .padding(4)
+                        } else {
+                            ForEach(engine.mscLogHistory) { msg in
+                                HStack(spacing: 4) {
+                                    Text(msg.timeString)
+                                        .font(.system(size: 6.5, design: .monospaced))
+                                        .foregroundColor(Color(white: 0.5))
+                                    Text(msg.summary)
+                                        .font(.system(size: 7, weight: .bold, design: .monospaced))
+                                        .foregroundColor(msg.isOutbound ? Color.cyan : Color.green)
+                                }
+                                .padding(.horizontal, 3)
+                                .padding(.vertical, 1.5)
+                                .background(Color.black.opacity(0.3))
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 90)
+            }
+            .padding(6)
+            .background(Color.black.opacity(0.45))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func mscTransportButton(title: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(color.opacity(0.35))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(color.opacity(0.8), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var showControlUnifiedOSCContent: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            // OSC Mode Selector: [🎛️ KEY & FADER MAPPINGS] vs [📡 MANUAL TRANSMITTER]
+            HStack(spacing: 4) {
+                Button(action: {
+                    engine.oscStudioMode = "MAPPINGS"
+                    SoundEffect.knobTick.play(with: engine.soundPack)
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "slider.horizontal.2.square.on.square")
+                        Text("KEY & FADER MAPPINGS (65)")
+                    }
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(engine.oscStudioMode == "MAPPINGS" ? engine.currentTheme.accentPrimary : Color.white.opacity(0.06))
+                    .foregroundColor(engine.oscStudioMode == "MAPPINGS" ? .black : .white)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(engine.oscStudioMode == "MAPPINGS" ? engine.currentTheme.accentPrimary : Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .hoverGrow(1.04)
+
+                Button(action: {
+                    engine.oscStudioMode = "TRANSMITTER"
+                    SoundEffect.knobTick.play(with: engine.soundPack)
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "paperplane.fill")
+                        Text("MANUAL PACKET TESTER")
+                    }
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(engine.oscStudioMode == "TRANSMITTER" ? engine.currentTheme.accentPrimary : Color.white.opacity(0.06))
+                    .foregroundColor(engine.oscStudioMode == "TRANSMITTER" ? .black : .white)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(engine.oscStudioMode == "TRANSMITTER" ? engine.currentTheme.accentPrimary : Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .hoverGrow(1.04)
+
+                Spacer()
+            }
+            .padding(.bottom, 2)
+
+            if engine.oscStudioMode == "TRANSMITTER" {
+                showControlOSCContent
+            } else {
+                midiToOSCStudioContent
+            }
+        }
+    }
+
+    private var showControlOSCContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("CUSTOM OSC (OPEN SOUND CONTROL) TRANSMITTER:")
+                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                .foregroundColor(engine.currentTheme.headerText)
+
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("HOST IP:")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("127.0.0.1", text: $engine.customOSCHost)
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("PORT:")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("53000", value: $engine.customOSCPort, formatter: NumberFormatter())
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("OSC ADDRESS:")
+                    .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.6))
+                TextField("/cue/selected/start", text: $engine.customOSCAddress)
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("ARG TYPE:")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    Picker("", selection: $engine.customOSCArgType) {
+                        Text("NONE (Bang)").tag("NONE")
+                        Text("FLOAT (,f)").tag("FLOAT")
+                        Text("INT (,i)").tag("INT")
+                        Text("STRING (,s)").tag("STRING")
+                        Text("TRUE (,T)").tag("BOOLEAN_TRUE")
+                        Text("FALSE (,F)").tag("BOOLEAN_FALSE")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .scaleEffect(0.82, anchor: .leading)
+                }
+
+                if engine.customOSCArgType != "NONE" && !engine.customOSCArgType.starts(with: "BOOLEAN") {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("ARG VALUE:")
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.6))
+                        TextField("Value", text: $engine.customOSCArgValue)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+            }
+
+            Button(action: {
+                engine.sendCustomOSC(
+                    host: engine.customOSCHost,
+                    port: engine.customOSCPort,
+                    address: engine.customOSCAddress,
+                    argType: engine.customOSCArgType,
+                    argValue: engine.customOSCArgValue
+                )
+                SoundEffect.keyTap.play(with: engine.soundPack)
+            }) {
+                HStack {
+                    Image(systemName: "paperplane.fill")
+                    Text("TRANSMIT OSC UDP")
+                }
+                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                .foregroundColor(.black)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(engine.currentTheme.accentPrimary)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+
+            // Quick Presets
+            VStack(alignment: .leading, spacing: 3) {
+                Text("QUICK APPLICATION PRESETS:")
+                    .font(.system(size: 6.8, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.65))
+
+                HStack(spacing: 3) {
+                    Button("QLAB GO") {
+                        engine.customOSCAddress = "/cue/selected/start"
+                        engine.customOSCPort = 53000
+                        engine.customOSCArgType = "NONE"
+                        engine.sendCustomOSC(host: engine.customOSCHost, port: 53000, address: "/cue/selected/start", argType: "NONE", argValue: "")
+                    }
+                    Button("QLAB PANIC") {
+                        engine.customOSCAddress = "/panic"
+                        engine.customOSCPort = 53000
+                        engine.customOSCArgType = "NONE"
+                        engine.sendCustomOSC(host: engine.customOSCHost, port: 53000, address: "/panic", argType: "NONE", argValue: "")
+                    }
+                    Button("EOS GO") {
+                        engine.customOSCAddress = "/eos/key/go_0"
+                        engine.customOSCPort = 8000
+                        engine.customOSCArgType = "NONE"
+                        engine.sendCustomOSC(host: engine.customOSCHost, port: 8000, address: "/eos/key/go_0", argType: "NONE", argValue: "")
+                    }
+                }
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .buttonStyle(.plain)
+                .foregroundColor(engine.currentTheme.accentPrimary)
+            }
+            .padding(5)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+
+            // Hardware Key & Fader Live OSC Broadcast
+            Toggle(isOn: $engine.midiToOSCMappingActive) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("LIVE BITCHBOY OSC ENGINE (ACTIVE)")
+                        .font(.system(size: 7.2, weight: .heavy, design: .monospaced))
+                        .foregroundColor(engine.midiToOSCMappingActive ? Color.green : Color.white)
+                    Text("Keys, Faders, & Encoders broadcast mapped OSC addresses via UDP")
+                        .font(.system(size: 6.2, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                }
+            }
+            .toggleStyle(.checkbox)
+            .padding(4)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .padding(6)
+        .background(Color.black.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    // ------------------------------------------------------------------------
+    // MIDI TO OSC CUSTOMIZATION STUDIO MATRIX VIEW (INDIVIDUAL KEYS & FADERS)
+    // ------------------------------------------------------------------------
+    private var midiToOSCStudioContent: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            // Master Header & Status
+            HStack(spacing: 6) {
+                Image(systemName: "slider.horizontal.2.square.on.square")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("MIDI ➔ OSC MAPPING MATRIX")
+                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        .foregroundColor(engine.currentTheme.headerText)
+                    Text("Map any button or fader to send custom OSC messages")
+                        .font(.system(size: 6.5, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                }
+                Spacer()
+                Toggle("", isOn: $engine.midiToOSCMappingActive)
+                    .toggleStyle(SwitchToggleStyle(tint: engine.currentTheme.accentPrimary))
+                    .labelsHidden()
+                    .scaleEffect(0.7)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(Color.white.opacity(0.04))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            // Quick Presets Bar
+            VStack(alignment: .leading, spacing: 3) {
+                Text("QUICK 1-CLICK TEMPLATES:")
+                    .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.55))
+
+                HStack(spacing: 3) {
+                    Button(action: { engine.applyOSCAutoMapTemplate() }) {
+                        Text("⚡ AUTO-MAP")
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 3)
+                            .background(Color.white.opacity(0.1))
+                            .foregroundColor(engine.currentTheme.accentPrimary)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .hoverGrow(1.05)
+                    .help("Auto-map all 65 controls to /bitchboy/...")
+
+                    Button(action: { engine.applyOSCQLabTemplate() }) {
+                        Text("🎭 QLAB")
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 3)
+                            .background(Color.white.opacity(0.1))
+                            .foregroundColor(.yellow)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .hoverGrow(1.05)
+                    .help("Map cues 1..32, transport and volume faders for QLab")
+
+                    Button(action: { engine.applyOSCResolumeTemplate() }) {
+                        Text("🎬 RESOLUME")
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 3)
+                            .background(Color.white.opacity(0.1))
+                            .foregroundColor(.cyan)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .hoverGrow(1.05)
+                    .help("Map layer clips and opacity faders for Resolume Arena")
+
+                    Button(action: { engine.applyOSCEosTemplate() }) {
+                        Text("💡 ETC EOS")
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 3)
+                            .background(Color.white.opacity(0.1))
+                            .foregroundColor(.orange)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .hoverGrow(1.05)
+                    .help("Map submasters and keys for ETC EOS / nomad")
+
+                    Button(action: { engine.clearAllOSCMappings() }) {
+                        Text("🧹 CLEAR")
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 3)
+                            .background(Color.red.opacity(0.2))
+                            .foregroundColor(.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .hoverGrow(1.05)
+                    .help("Disable all mappings")
+                }
+            }
+
+            // Target Host & Port default strip
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("GLOBAL TARGET IP:")
+                        .font(.system(size: 6, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("127.0.0.1", text: $engine.customOSCHost)
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2.5)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("PORT:")
+                        .font(.system(size: 6, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("53000", value: $engine.customOSCPort, formatter: NumberFormatter())
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2.5)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("SEARCH / FILTER:")
+                        .font(.system(size: 6, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("Search key/fader...", text: $engine.midiToOSCSearchText)
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2.5)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+            }
+
+            // Section Filter Tabs
+            HStack(spacing: 2) {
+                oscFilterTabButton(title: "ALL", filterKey: "ALL")
+                oscFilterTabButton(title: "GRID", filterKey: "GRID")
+                oscFilterTabButton(title: "STRIP", filterKey: "STRIP")
+                oscFilterTabButton(title: "PAD", filterKey: "PAD")
+                oscFilterTabButton(title: "V-FADERS", filterKey: "VFADERS")
+                oscFilterTabButton(title: "H-FADERS", filterKey: "HFADERS")
+                oscFilterTabButton(title: "MASTER/KNOBS", filterKey: "MASTER_KNOBS")
+            }
+
+            // Controls List
+            let indices = engine.filteredControlIndices()
+            if indices.isEmpty {
+                VStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14))
+                        .foregroundColor(Color(white: 0.4))
+                    Text("No matching controls")
+                        .font(.system(size: 7.5, design: .monospaced))
+                        .foregroundColor(Color(white: 0.5))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+            } else {
+                LazyVStack(spacing: 4) {
+                    ForEach(indices, id: \.self) { idx in
+                        oscControlMappingCard(index: idx)
+                    }
+                }
+            }
+        }
+        .padding(6)
+        .background(Color.black.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func oscFilterTabButton(title: String, filterKey: String) -> some View {
+        let isActive = engine.midiToOSCFilter == filterKey
+        return Button(action: {
+            engine.midiToOSCFilter = filterKey
+            SoundEffect.knobTick.play(with: engine.soundPack)
+        }) {
+            Text(title)
+                .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2.5)
+                .background(isActive ? engine.currentTheme.accentPrimary : Color.white.opacity(0.06))
+                .foregroundColor(isActive ? .black : Color(white: 0.7))
+                .clipShape(RoundedRectangle(cornerRadius: 3.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func oscControlMappingCard(index: Int) -> some View {
+        let item = engine.controls[index]
+        let isKey = item.kind == .key
+        let isFader = item.kind == .vfader || item.kind == .hfader
+
+        return VStack(alignment: .leading, spacing: 4) {
+            // Header Row: Checkbox, Control Identifier & Number, Live Status, Test Trigger
+            HStack(spacing: 5) {
+                // Enabled Checkbox
+                Button(action: {
+                    engine.controls[index].oscEnabled.toggle()
+                    SoundEffect.knobTick.play(with: engine.soundPack)
+                }) {
+                    Image(systemName: engine.controls[index].oscEnabled ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(engine.controls[index].oscEnabled ? engine.currentTheme.accentPrimary : Color(white: 0.4))
+                }
+                .buttonStyle(.plain)
+
+                // Kind Badge
+                Text(isKey ? "KEY #\(item.number)" : (isFader ? "FADER CC\(item.number)" : "KNOB CC\(item.number)"))
+                    .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1.5)
+                    .background(engine.controls[index].oscEnabled ? engine.currentTheme.accentPrimary.opacity(0.18) : Color.white.opacity(0.06))
+                    .foregroundColor(engine.controls[index].oscEnabled ? engine.currentTheme.accentPrimary : Color(white: 0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+
+                // Control Name / Label
+                Text(item.label)
+                    .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
+
+                // Live status pill
+                if isKey {
+                    if item.isPressed {
+                        Text("PRESSED")
+                            .font(.system(size: 6, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.green)
+                            .foregroundColor(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 2))
+                    }
+                } else {
+                    Text("\(item.liveValue)")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(engine.currentTheme.accentPrimary)
+                }
+
+                Spacer()
+
+                // Test Trigger Button
+                Button(action: {
+                    engine.sendOSCForControl(index: index, isPress: true)
+                    SoundEffect.keyTap.play(with: engine.soundPack)
+                }) {
+                    HStack(spacing: 2) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 6.5))
+                        Text("TEST")
+                            .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(engine.currentTheme.accentPrimary)
+                    .clipShape(RoundedRectangle(cornerRadius: 3.5))
+                }
+                .buttonStyle(.plain)
+                .hoverGrow(1.05)
+            }
+
+            // Custom Name / Alias + OSC Address
+            HStack(spacing: 5) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("CUSTOM ALIAS:")
+                        .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.5))
+                    TextField(item.label, text: $engine.controls[index].customName)
+                        .font(.system(size: 7, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(0.4))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+                .frame(width: 80)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("OSC ADDRESS PATH:")
+                        .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.5))
+                    TextField(isKey ? "/bitchboy/key/\(index + 1)" : "/bitchboy/fader/\(max(1, index - 48))", text: $engine.controls[index].oscAddress)
+                        .font(.system(size: 7, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(0.4))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+            }
+
+            // OSC Parameters (Arg Type, Values, Scaling, Release)
+            HStack(spacing: 5) {
+                // Arg Type Picker
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("ARG TYPE:")
+                        .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.5))
+                    Picker("", selection: $engine.controls[index].oscArgType) {
+                        Text("FLOAT").tag("FLOAT")
+                        Text("INT").tag("INT")
+                        Text("BANG / NONE").tag("NONE")
+                        Text("STRING").tag("STRING")
+                        if isKey {
+                            Text("BOOL").tag("BOOLEAN")
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.system(size: 7, design: .monospaced))
+                    .frame(height: 18)
+                }
+                .frame(width: 85)
+
+                if isKey {
+                    // Send on Release Checkbox & Release Value
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("ON RELEASE:")
+                            .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.5))
+                        HStack(spacing: 3) {
+                            Button(action: {
+                                engine.controls[index].oscSendRelease.toggle()
+                            }) {
+                                Image(systemName: engine.controls[index].oscSendRelease ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(engine.controls[index].oscSendRelease ? .green : Color(white: 0.4))
+                            }
+                            .buttonStyle(.plain)
+
+                            if engine.controls[index].oscSendRelease {
+                                TextField("0.0", text: $engine.controls[index].oscReleaseVal)
+                                    .font(.system(size: 7, design: .monospaced))
+                                    .textFieldStyle(.plain)
+                                    .frame(width: 32)
+                                    .padding(.horizontal, 2)
+                                    .padding(.vertical, 1.5)
+                                    .background(Color.black.opacity(0.4))
+                                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                            }
+                        }
+                    }
+                } else {
+                    // Fader / Knob Min and Max Range
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("MIN VAL:")
+                            .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.5))
+                        TextField("0.0", value: $engine.controls[index].oscMinVal, formatter: NumberFormatter())
+                            .font(.system(size: 7, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .frame(width: 44)
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 1.5)
+                            .background(Color.black.opacity(0.4))
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("MAX VAL:")
+                            .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.5))
+                        TextField("1.0", value: $engine.controls[index].oscMaxVal, formatter: NumberFormatter())
+                            .font(.system(size: 7, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .frame(width: 44)
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 1.5)
+                            .background(Color.black.opacity(0.4))
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                }
+
+                Spacer()
+            }
+        }
+        .padding(6)
+        .background(engine.controls[index].oscEnabled ? Color.white.opacity(0.04) : Color.black.opacity(0.2))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(engine.controls[index].oscEnabled ? engine.currentTheme.accentPrimary.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var showControlArtNetContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ART-NET 4 DMX TRANSMITTER (UDP 6454):")
+                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                .foregroundColor(engine.currentTheme.headerText)
+
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("HOST / BROADCAST IP:")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("255.255.255.255", text: $engine.artNetHost)
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("UNIVERSE (0-32767):")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("0", value: $engine.artNetUniverse, formatter: NumberFormatter())
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+            }
+
+            // Quick DMX Triggers
+            HStack(spacing: 4) {
+                Button("💡 FULL RIG 100%") {
+                    engine.sendArtNetFullRig()
+                    SoundEffect.presetSwitch.play(with: engine.soundPack)
+                }
+                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                .foregroundColor(.black)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .background(Color.yellow)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .buttonStyle(.plain)
+
+                Button("🌑 BLACKOUT") {
+                    engine.sendArtNetBlackout()
+                    SoundEffect.presetSwitch.play(with: engine.soundPack)
+                }
+                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                .foregroundColor(.white)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .background(Color.red.opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .buttonStyle(.plain)
+
+                Button("🌈 RGB CHASE") {
+                    engine.sendArtNetRGBChase()
+                    SoundEffect.presetSwitch.play(with: engine.soundPack)
+                }
+                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                .foregroundColor(.black)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .background(Color.cyan)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .buttonStyle(.plain)
+            }
+
+            // Hardware Vertical Fader Mirroring Toggle
+            Toggle(isOn: $engine.artNetMirrorHardwareFaders) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("MIRROR HARDWARE FADERS VF1–VF8 TO DMX CH 1–8")
+                        .font(.system(size: 7.2, weight: .heavy, design: .monospaced))
+                        .foregroundColor(engine.artNetMirrorHardwareFaders ? Color.green : Color.white)
+                    Text("Moving physical sliders immediately broadcasts UDP DMX packets")
+                        .font(.system(size: 6.2, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                }
+            }
+            .toggleStyle(.checkbox)
+            .padding(4)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            // 8 Direct DMX Channel Sliders
+            VStack(alignment: .leading, spacing: 2) {
+                Text("DMX CHANNELS 1–8 LIVE FADERS:")
+                    .font(.system(size: 6.8, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.65))
+
+                HStack(spacing: 4) {
+                    ForEach(0..<8) { ch in
+                        VStack(spacing: 1) {
+                            Text("Ch\(ch+1)")
+                                .font(.system(size: 5.5, weight: .bold, design: .monospaced))
+                                .foregroundColor(Color(white: 0.6))
+                            Text("\(engine.artNetChannels[ch])")
+                                .font(.system(size: 6, weight: .heavy, design: .monospaced))
+                                .foregroundColor(engine.currentTheme.accentPrimary)
+                            Slider(
+                                value: Binding(
+                                    get: { Double(engine.artNetChannels[ch]) },
+                                    set: { v in
+                                        engine.artNetChannels[ch] = UInt8(v)
+                                        engine.sendArtNetDMX(host: engine.artNetHost, universe: engine.artNetUniverse, channels: engine.artNetChannels)
+                                    }
+                                ),
+                                in: 0...255,
+                                step: 1
+                            )
+                            .labelsHidden()
+                        }
+                    }
+                }
+            }
+            .padding(5)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .padding(6)
+        .background(Color.black.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var showControlsACNContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ANSI E1.31 sACN TRANSMITTER (UDP 5568):")
+                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                .foregroundColor(engine.currentTheme.headerText)
+
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("UNIVERSE (1-63999):")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("1", value: $engine.sacnUniverse, formatter: NumberFormatter())
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("PRIORITY (1-200):")
+                        .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                    TextField("100", value: $engine.sacnPriority, formatter: NumberFormatter())
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("UNICAST IP (LEAVE EMPTY FOR MULTICAST):")
+                    .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.6))
+                TextField("Multicast 239.255.x.y", text: $engine.sacnHost)
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+
+            HStack(spacing: 4) {
+                Button("🌟 FULL RIG 100%") {
+                    engine.sendsACNFullRig()
+                    SoundEffect.presetSwitch.play(with: engine.soundPack)
+                }
+                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                .foregroundColor(.black)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .background(Color.green)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .buttonStyle(.plain)
+
+                Button("🌑 BLACKOUT") {
+                    engine.sendsACNBlackout()
+                    SoundEffect.presetSwitch.play(with: engine.soundPack)
+                }
+                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                .foregroundColor(.white)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .background(Color.red.opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 2)
+        }
+        .padding(6)
+        .background(Color.black.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var showControlFeedbackContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("CUSTOMIZABLE HARDWARE MIDI FEEDBACK:")
+                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                .foregroundColor(engine.currentTheme.headerText)
+
+            Toggle(isOn: $engine.hardwareFeedbackEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("LOCAL HARDWARE LED FEEDBACK")
+                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                        .foregroundColor(.white)
+                    Text("When ON, pressing keys immediately updates BitchBoy LEDs locally based on feedback mode.")
+                        .font(.system(size: 6.8, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                }
+            }
+            .toggleStyle(.checkbox)
+            .padding(4)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            Toggle(isOn: $engine.inboundMIDIEchoEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("DAW / INBOUND NOTE HARDWARE ECHO")
+                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                        .foregroundColor(.white)
+                    Text("When ON, incoming MIDI notes from QLab or DAWs light up the hardware key LEDs.")
+                        .font(.system(size: 6.8, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+                }
+            }
+            .toggleStyle(.checkbox)
+            .padding(4)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            Text("Selected Control: \(engine.controls[engine.selectedIndex].label)")
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .foregroundColor(engine.currentTheme.accentPrimary)
+                .padding(.top, 2)
+
+            HStack(spacing: 4) {
+                Text("MODE:")
+                    .font(.system(size: 6.8, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(white: 0.6))
+                Picker("", selection: Binding(
+                    get: { engine.controls[engine.selectedIndex].feedbackMode },
+                    set: { mode in
+                        let targets = engine.selectedIndices.count > 1 ? engine.selectedIndices : [engine.selectedIndex]
+                        for idx in targets {
+                            engine.controls[idx].feedbackMode = mode
+                        }
+                        engine.saveCurrentSlot()
+                    }
+                )) {
+                    ForEach(FeedbackMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .scaleEffect(0.82, anchor: .leading)
+            }
+        }
+        .padding(6)
+        .background(Color.black.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    // ------------------------------------------------------------------------
     // LEFT WING (RED BOX #3): HARDWARE MEMORY SLOTS & CUSTOM PRESET BANK DECK
     // ------------------------------------------------------------------------
-    private var leftWingMemorySlotsPanel: some View {
+    private func leftWingMemorySlotsPanel(isSpotlight: Bool = false) -> some View {
         let slotLetters = ["A", "B", "C", "D", "E", "F", "G", "H"]
         let bankRange: Range<Int> = activeMemoryBank == 0 ? (0..<min(4, engine.slots.count)) : (min(4, engine.slots.count)..<min(8, engine.slots.count))
         let activeIdx = min(max(0, engine.activeSlot), max(0, engine.slots.count - 1))
         let activeSlotColor = engine.slots.indices.contains(activeIdx) ? ledColor(engine.slots[activeIdx].accentVelocity) : engine.currentTheme.accentPrimary
 
         return VStack(alignment: .leading, spacing: 6) {
-            // Header & Bank A-D / E-H Switcher
-            HStack(spacing: 5) {
-                Image(systemName: "memorychip.fill")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(activeSlotColor)
-                    .shadow(color: activeSlotColor.opacity(0.8), radius: 4)
-                Text("MEMORY SLOTS // BANK")
-                    .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
-                    .foregroundColor(engine.currentTheme.headerText)
-                Spacer()
+            if !isSpotlight {
+                // Header & Bank A-D / E-H Switcher (CLICK TOP BAR TO CENTER ON SCREEN & BLUR BACKGROUND!)
+                HStack(spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "memorychip.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(activeSlotColor)
+                            .shadow(color: activeSlotColor.opacity(0.8), radius: 4)
+                        Text("MEMORY SLOTS // BANK")
+                            .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.currentTheme.headerText)
+                        Spacer(minLength: 2)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        engine.toggleSpotlightModule(.memorySlots)
+                    }
 
-                HStack(spacing: 3) {
+                    HStack(spacing: 3) {
+                        Button(action: {
+                            activeMemoryBank = 0
+                            SoundEffect.knobTick.play(with: engine.soundPack)
+                        }) {
+                            Text("A–D")
+                                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2.5)
+                                .background(activeMemoryBank == 0 ? engine.currentTheme.accentPrimary : Color.white.opacity(0.08))
+                                .foregroundColor(activeMemoryBank == 0 ? .black : Color(white: 0.75))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                        .buttonStyle(.plain)
+
+                        if engine.slots.count > 4 {
+                            Button(action: {
+                                activeMemoryBank = 1
+                                SoundEffect.knobTick.play(with: engine.soundPack)
+                            }) {
+                                Text("E–H")
+                                    .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2.5)
+                                    .background(activeMemoryBank == 1 ? engine.currentTheme.accentPrimary : Color.white.opacity(0.08))
+                                    .foregroundColor(activeMemoryBank == 1 ? .black : Color(white: 0.75))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    moduleHeaderControls(for: .memorySlots)
+                }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 4)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+            } else {
+                HStack(spacing: 6) {
+                    Text("ACTIVE PRESET BANK:")
+                        .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                        .foregroundColor(Color(white: 0.6))
+
                     Button(action: {
                         activeMemoryBank = 0
                         SoundEffect.knobTick.play(with: engine.soundPack)
                     }) {
-                        Text("A–D")
-                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2.5)
+                        Text("BANK A–D")
+                            .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
                             .background(activeMemoryBank == 0 ? engine.currentTheme.accentPrimary : Color.white.opacity(0.08))
                             .foregroundColor(activeMemoryBank == 0 ? .black : Color(white: 0.75))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -4076,21 +10437,25 @@ struct ContentView: View {
                             activeMemoryBank = 1
                             SoundEffect.knobTick.play(with: engine.soundPack)
                         }) {
-                            Text("E–H")
-                                .font(.system(size: 7, weight: .heavy, design: .monospaced))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2.5)
+                            Text("BANK E–H")
+                                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3.5)
                                 .background(activeMemoryBank == 1 ? engine.currentTheme.accentPrimary : Color.white.opacity(0.08))
                                 .foregroundColor(activeMemoryBank == 1 ? .black : Color(white: 0.75))
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         }
                         .buttonStyle(.plain)
                     }
+                    Spacer()
                 }
+                .padding(.bottom, 2)
             }
 
-            // 2x2 Tactile Illuminated Memory Slot Pads
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+            ScrollView([.vertical], showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 6) {
+                    // 2x2 Tactile Illuminated Memory Slot Pads
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
                 ForEach(Array(bankRange), id: \.self) { idx in
                     let slot = engine.slots[idx]
                     let isSelected = (engine.activeSlot == idx)
@@ -4235,18 +10600,22 @@ struct ContentView: View {
 
                     if showSlotCustomizer {
                         HStack(spacing: 4) {
-                            Text("COLOR:")
-                                .font(.system(size: 6.5, weight: .bold, design: .monospaced))
-                                .foregroundColor(Color(white: 0.6))
-                            let swatches: [UInt8] = [5, 24, 38, 52, 68, 98, 112, 127]
+                            Text("COLOR: \(BitchBoyHardwareColor.formattedLabel(for: engine.slots[activeIdx].accentVelocity))")
+                                .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                                .foregroundColor(activeSlotColor)
+                            Spacer(minLength: 0)
+                        }
+                        HStack(spacing: 4) {
+                            let swatches: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 83, 3]
                             ForEach(swatches, id: \.self) { vel in
                                 Circle()
                                     .fill(ledColor(vel))
-                                    .frame(width: 12, height: 12)
+                                    .frame(width: 13, height: 13)
                                     .overlay(
                                         Circle()
-                                            .stroke(Color.white, lineWidth: engine.slots[activeIdx].accentVelocity == vel ? 1.5 : 0)
+                                            .stroke(Color.white, lineWidth: engine.slots[activeIdx].accentVelocity == vel ? 1.8 : 0)
                                     )
+                                    .shadow(color: engine.slots[activeIdx].accentVelocity == vel ? ledColor(vel) : .clear, radius: 3)
                                     .onTapGesture {
                                         engine.slots[activeIdx].accentVelocity = vel
                                         engine.saveCurrentSlot()
@@ -4304,16 +10673,18 @@ struct ContentView: View {
                 } label: {
                     HStack(spacing: 2) {
                         Image(systemName: "doc.on.doc.fill")
+                            .font(.system(size: 7))
                         Text("CLONE")
+                            .font(.system(size: 6, weight: .heavy, design: .monospaced))
+                            .lineLimit(1)
                     }
-                    .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 4.5)
                     .background(Color.white.opacity(0.1))
                     .foregroundColor(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 5))
                 }
-                .menuStyle(.borderlessButton)
+                .buttonStyle(.plain)
 
                 Button(action: {
                     _ = engine.exportPresetToJSON()
@@ -4362,12 +10733,16 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
             }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(9)
-        .background(Color.black.opacity(0.46))
+        .background(isSpotlight ? Color.clear : Color.black.opacity(0.46))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(activeSlotColor.opacity(0.75), lineWidth: 1.2)
+                .stroke(isSpotlight ? Color.clear : activeSlotColor.opacity(0.75), lineWidth: 1.2)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
@@ -4375,25 +10750,39 @@ struct ContentView: View {
     // ------------------------------------------------------------------------
     // RIGHT WING (RED BOX #2): GROUND-UP CUSTOM LIGHTING FX STUDIO
     // ------------------------------------------------------------------------
-    private var rightWingStudioPanel: some View {
+    private func rightWingStudioPanel(isSpotlight: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            // Header
-            HStack {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(engine.currentTheme.accentPrimary)
-                Text("CUSTOM FX STUDIO")
-                    .font(.system(size: 9, weight: .heavy, design: .monospaced))
-                    .foregroundColor(engine.currentTheme.headerText)
-                Spacer()
-                if engine.isPlayingCustomFX {
-                    HStack(spacing: 3) {
-                        Circle().fill(Color.green).frame(width: 6, height: 6)
-                        Text("LIVE ON HW")
-                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
-                            .foregroundColor(.green)
+            if !isSpotlight {
+                // Header (CLICK TOP BAR TO CENTER ON SCREEN & BLUR BACKGROUND!)
+                HStack(spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(engine.currentTheme.accentPrimary)
+                        Text("CUSTOM FX STUDIO")
+                            .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.currentTheme.headerText)
+                        Spacer(minLength: 2)
+                        if engine.isPlayingCustomFX {
+                            HStack(spacing: 3) {
+                                Circle().fill(Color.green).frame(width: 6, height: 6)
+                                Text("LIVE ON HW")
+                                    .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                                    .foregroundColor(.green)
+                            }
+                        }
                     }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        engine.toggleSpotlightModule(.customFXStudio)
+                    }
+
+                    moduleHeaderControls(for: .customFXStudio)
                 }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 4)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
             }
 
             // 3-Tab Switcher: Frame Sequencer / Procedural Wave Synth / Saved Shows
@@ -4411,19 +10800,23 @@ struct ContentView: View {
                 }
             }
 
-            if engine.rightWingTab == "SEQUENCER" {
-                rightWingFrameSequencerContent
-            } else if engine.rightWingTab == "WAVESYNTH" {
-                rightWingWaveSynthContent
-            } else {
-                rightWingSavedLibraryContent
+            ScrollView([.vertical], showsIndicators: true) {
+                if engine.rightWingTab == "SEQUENCER" {
+                    rightWingFrameSequencerContent
+                } else if engine.rightWingTab == "WAVESYNTH" {
+                    rightWingWaveSynthContent
+                } else {
+                    rightWingSavedLibraryContent
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(10)
-        .background(Color.black.opacity(0.42))
+        .background(isSpotlight ? Color.clear : Color.black.opacity(0.42))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(engine.currentTheme.sectionOutline.opacity(0.75), lineWidth: 1.2)
+                .stroke(isSpotlight ? Color.clear : engine.currentTheme.sectionOutline.opacity(0.75), lineWidth: 1.2)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
@@ -4474,6 +10867,24 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                 }
                 .buttonStyle(.plain)
+
+                let isCurrentConnectFX = (engine.connectCustomFXName == engine.editingCustomFX.name && engine.connectEffectEnabled)
+                Button(action: {
+                    engine.saveEditingCustomFXToLibrary()
+                    engine.setAsOnConnectFX(engine.editingCustomFX)
+                }) {
+                    HStack(spacing: 2) {
+                        Image(systemName: isCurrentConnectFX ? "bolt.circle.fill" : "bolt.fill")
+                        Text(isCurrentConnectFX ? "ON-CONNECT" : "SET CONNECT")
+                    }
+                    .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 5)
+                    .background(isCurrentConnectFX ? Color(red: 0.96, green: 0.76, blue: 0.18) : Color.white.opacity(0.12))
+                    .foregroundColor(isCurrentConnectFX ? .black : Color(red: 0.96, green: 0.78, blue: 0.25))
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
             }
 
             // Toggle to paint directly on the big 49-key BitchBoy console!
@@ -4502,7 +10913,7 @@ struct ContentView: View {
                         .font(.system(size: 7, weight: .heavy, design: .monospaced))
                         .foregroundColor(Color(white: 0.65))
                     Spacer()
-                    Text("BRUSH: \(engine.customBrushVelocity)")
+                    Text("BRUSH: \(BitchBoyHardwareColor.formattedLabel(for: engine.customBrushVelocity))")
                         .font(.system(size: 7, weight: .heavy, design: .monospaced))
                         .foregroundColor(ledColor(engine.customBrushVelocity))
                 }
@@ -4548,18 +10959,18 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.12), lineWidth: 1))
             }
 
-            // 11-Color Neon Brush Swatches + Velocity Slider
+            // 13 Authentic BitchBoy Hardware Color Swatches
             VStack(alignment: .leading, spacing: 3) {
-                Text("NEON COLOR BRUSH PALETTE")
+                Text("AUTHENTIC HARDWARE COLOR PALETTE")
                     .font(.system(size: 7, weight: .heavy, design: .monospaced))
                     .foregroundColor(engine.currentTheme.headerText)
 
                 let swatches: [(String, UInt8)] = [
-                    ("OFF", 0), ("RED", 5), ("ORG", 14), ("YLW", 24),
-                    ("LIM", 38), ("GRN", 52), ("CYN", 68), ("BLU", 84),
-                    ("PRP", 98), ("PNK", 112), ("WHT", 127)
+                    ("OFF", 0), ("WHT", 3), ("TRQ", 33), ("BLU", 41),
+                    ("ORG", 61), ("PRP", 67), ("RED", 72), ("YLW", 74),
+                    ("CYN", 78), ("BRN", 83), ("GRN", 87), ("PNK", 95), ("AMB", 96)
                 ]
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 6), spacing: 3) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 7), spacing: 3) {
                     ForEach(swatches, id: \.1) { item in
                         let isSel = (engine.customBrushVelocity == item.1)
                         Button(action: {
@@ -4570,7 +10981,7 @@ struct ContentView: View {
                                     .fill(item.1 == 0 ? Color(white: 0.25) : ledColor(item.1))
                                     .frame(width: 6, height: 6)
                                 Text(item.0)
-                                    .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                                    .font(.system(size: 6, weight: .heavy, design: .monospaced))
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 3)
@@ -4744,7 +11155,7 @@ struct ContentView: View {
                 }
 
                 HStack {
-                    Text("MIN COLOR: \(engine.editingCustomFX.minVelocity)")
+                    Text("MIN COLOR: \(BitchBoyHardwareColor.formattedLabel(for: engine.editingCustomFX.minVelocity))")
                         .font(.system(size: 7, weight: .bold, design: .monospaced))
                         .foregroundColor(ledColor(engine.editingCustomFX.minVelocity))
                     Slider(
@@ -4758,7 +11169,7 @@ struct ContentView: View {
                 }
 
                 HStack {
-                    Text("MAX COLOR: \(engine.editingCustomFX.maxVelocity)")
+                    Text("MAX COLOR: \(BitchBoyHardwareColor.formattedLabel(for: engine.editingCustomFX.maxVelocity))")
                         .font(.system(size: 7, weight: .bold, design: .monospaced))
                         .foregroundColor(ledColor(engine.editingCustomFX.maxVelocity))
                     Slider(
@@ -4839,6 +11250,17 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 5))
                 .buttonStyle(.plain)
 
+                Button("⚡ TEST CONNECT FX") {
+                    engine.triggerBitchBoyConnectedNotificationFX(isManualTest: true)
+                }
+                .font(.system(size: 6.5, weight: .heavy, design: .monospaced))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(Color(red: 0.96, green: 0.76, blue: 0.18).opacity(0.25))
+                .foregroundColor(Color(red: 0.96, green: 0.78, blue: 0.25))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .buttonStyle(.plain)
+
                 Spacer()
 
                 Button("⤓ EXPORT") { engine.exportCustomFXToClipboard() }
@@ -4856,17 +11278,41 @@ struct ContentView: View {
                 VStack(spacing: 5) {
                     ForEach(engine.customEffects) { fx in
                         let isRunning = engine.isPlayingCustomFX && engine.activeCustomFXName == fx.name
+                        let isConnectFX = engine.connectEffectEnabled && engine.connectCustomFXName == fx.name
                         HStack(spacing: 6) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(fx.name)
-                                    .font(.system(size: 8, weight: .heavy, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
+                                HStack(spacing: 4) {
+                                    Text(fx.name)
+                                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    if isConnectFX {
+                                        Text("ON-CONNECT")
+                                            .font(.system(size: 5.5, weight: .heavy, design: .monospaced))
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(Color(red: 0.96, green: 0.76, blue: 0.18))
+                                            .foregroundColor(.black)
+                                            .clipShape(Capsule())
+                                    }
+                                }
                                 Text(fx.isProcedural ? "WAVE SYNTH // \(fx.waveShape.rawValue)" : "\(fx.frames.count) FRAMES // \(Int(fx.fps)) FPS // \(fx.loopMode.rawValue)")
                                     .font(.system(size: 6.5, design: .monospaced))
                                     .foregroundColor(Color(white: 0.6))
                             }
                             Spacer()
+                            Button(action: {
+                                engine.setAsOnConnectFX(fx)
+                            }) {
+                                Image(systemName: isConnectFX ? "bolt.circle.fill" : "bolt.fill")
+                                    .font(.system(size: 8))
+                                    .padding(4)
+                                    .background(isConnectFX ? Color(red: 0.96, green: 0.76, blue: 0.18) : Color.white.opacity(0.12))
+                                    .foregroundColor(isConnectFX ? .black : Color(red: 0.96, green: 0.78, blue: 0.25))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                            .buttonStyle(.plain)
+
                             Button(isRunning ? "⏹" : "▶️ RUN") {
                                 if isRunning {
                                     engine.stopCustomEffect()
@@ -4914,53 +11360,69 @@ struct ContentView: View {
     // ------------------------------------------------------------------------
     // RIGHT WING (RED BOX #4): REACTIVE MECHANICAL KEYBOARD KEY-PRESS FX ENGINE
     // ------------------------------------------------------------------------
-    private var rightWingReactiveKeyFXPanel: some View {
+    private func rightWingReactiveKeyFXPanel(isSpotlight: Bool = false) -> some View {
         let isEnabled = (engine.reactiveKeyFXMode != .off)
         let activeColor = engine.reactiveFXRainbowColor ? engine.currentTheme.accentPrimary : ledColor(engine.reactiveFXColorVelocity)
 
         return VStack(alignment: .leading, spacing: 6) {
-            // Header & Live Pulse Status
-            HStack(spacing: 5) {
-                Image(systemName: "waveform.circle.fill")
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundColor(isEnabled ? activeColor : Color(white: 0.5))
-                    .shadow(color: isEnabled ? activeColor.opacity(0.85) : .clear, radius: 4)
+            if !isSpotlight {
+                // Header & Live Pulse Status (CLICK TOP BAR TO CENTER ON SCREEN & BLUR BACKGROUND!)
+                HStack(spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "waveform.circle.fill")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundColor(isEnabled ? activeColor : Color(white: 0.5))
+                            .shadow(color: isEnabled ? activeColor.opacity(0.85) : .clear, radius: 4)
 
-                Text("REACTIVE KEY FX // LIVE")
-                    .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
-                    .foregroundColor(engine.currentTheme.headerText)
+                        Text("REACTIVE KEY FX // LIVE")
+                            .font(.system(size: 8.5, weight: .heavy, design: .monospaced))
+                            .foregroundColor(engine.currentTheme.headerText)
 
-                Spacer()
-
-                Button(action: {
-                    if engine.reactiveKeyFXMode == .off {
-                        engine.reactiveKeyFXMode = .ripple
-                    } else {
-                        engine.reactiveKeyFXMode = .off
-                        engine.activeReactivePulses.removeAll()
-                        engine.restorePresetLEDs()
+                        Spacer(minLength: 2)
                     }
-                    SoundEffect.knobTick.play(with: engine.soundPack)
-                }) {
-                    HStack(spacing: 3) {
-                        Circle()
-                            .fill(isEnabled ? Color.green : Color(white: 0.4))
-                            .frame(width: 6, height: 6)
-                            .shadow(color: isEnabled ? Color.green : .clear, radius: 3)
-                        Text(isEnabled ? "ACTIVE" : "OFF")
-                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        engine.toggleSpotlightModule(.reactiveKeyFX)
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2.5)
-                    .background(isEnabled ? Color.green.opacity(0.18) : Color.white.opacity(0.08))
-                    .foregroundColor(isEnabled ? Color.green : Color(white: 0.6))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+
+                    Button(action: {
+                        if engine.reactiveKeyFXMode == .off {
+                            engine.reactiveKeyFXMode = .ripple
+                        } else {
+                            engine.reactiveKeyFXMode = .off
+                            engine.activeReactivePulses.removeAll()
+                            engine.restorePresetLEDs()
+                        }
+                        SoundEffect.knobTick.play(with: engine.soundPack)
+                    }) {
+                        HStack(spacing: 3) {
+                            Circle()
+                                .fill(isEnabled ? Color.green : Color(white: 0.4))
+                                .frame(width: 6, height: 6)
+                                .shadow(color: isEnabled ? Color.green : .clear, radius: 3)
+                            Text(isEnabled ? "ACTIVE" : "OFF")
+                                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(isEnabled ? Color.green.opacity(0.18) : Color.white.opacity(0.08))
+                        .foregroundColor(isEnabled ? Color.green : Color(white: 0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+
+                    moduleHeaderControls(for: .reactiveKeyFX)
                 }
-                .buttonStyle(.plain)
+                .padding(.vertical, 2)
+                .padding(.horizontal, 4)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
             }
 
-            // 6 Interactive Mechanical Keyboard FX Mode Pads (2x3 Grid)
-            let modes: [ReactiveKeyFXMode] = [.ripple, .crossLaser, .supernova, .heatTrail, .meteorRain, .arcLightning]
+            ScrollView([.vertical], showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 6) {
+                    // 6 Interactive Mechanical Keyboard FX Mode Pads (2x3 Grid)
+                    let modes: [ReactiveKeyFXMode] = [.ripple, .crossLaser, .supernova, .heatTrail, .meteorRain, .arcLightning]
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 5), GridItem(.flexible(), spacing: 5), GridItem(.flexible(), spacing: 5)], spacing: 5) {
                 ForEach(modes) { mode in
                     let isSel = (engine.reactiveKeyFXMode == mode)
@@ -5026,7 +11488,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
 
-                    let colorSwatches: [UInt8] = [5, 14, 24, 52, 68, 84, 98, 112, 127]
+                    let colorSwatches: [UInt8] = [72, 61, 96, 74, 87, 33, 78, 41, 67, 95, 83, 3]
                     ForEach(colorSwatches, id: \.self) { vel in
                         let isPicked = (!engine.reactiveFXRainbowColor && engine.reactiveFXColorVelocity == vel)
                         Circle()
@@ -5044,6 +11506,12 @@ struct ContentView: View {
                             }
                     }
                     Spacer(minLength: 0)
+
+                    if !engine.reactiveFXRainbowColor {
+                        Text(BitchBoyHardwareColor.formattedLabel(for: engine.reactiveFXColorVelocity))
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(ledColor(engine.reactiveFXColorVelocity))
+                    }
                 }
             }
             .padding(5)
@@ -5077,12 +11545,16 @@ struct ContentView: View {
                     .background(Color.black.opacity(0.5))
                     .clipShape(RoundedRectangle(cornerRadius: 5))
             }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(9)
-        .background(Color.black.opacity(0.46))
+        .background(isSpotlight ? Color.clear : Color.black.opacity(0.46))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(isEnabled ? activeColor.opacity(0.75) : engine.currentTheme.sectionOutline.opacity(0.5), lineWidth: 1.2)
+                .stroke(isSpotlight ? Color.clear : (isEnabled ? activeColor.opacity(0.75) : engine.currentTheme.sectionOutline.opacity(0.5)), lineWidth: 1.2)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
@@ -5099,6 +11571,7 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
+        .hoverGrow(1.05)
     }
 
     private func filterTogglePill(label: String, isOn: Binding<Bool>) -> some View {
@@ -5116,6 +11589,7 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
+        .hoverGrow(1.04)
     }
 
     private func macroTriggerPad(title: String, icon: String, action: @escaping () -> Void) -> some View {
@@ -5138,6 +11612,7 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(engine.currentTheme.accentPrimary.opacity(0.35), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .hoverGrow(1.06)
     }
 
     private func miniCanvasKey(keyIndex: Int) -> some View {
@@ -5157,6 +11632,7 @@ struct ContentView: View {
                 )
         }
         .buttonStyle(.plain)
+        .hoverGrow(1.15)
     }
 
     private func miniToolBtn(_ title: String, action: @escaping () -> Void) -> some View {
@@ -5170,6 +11646,7 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
+        .hoverGrow(1.06)
     }
 
     // ------------------------------------------------------------------------
@@ -5311,141 +11788,7 @@ struct ContentView: View {
     }
 
     // ------------------------------------------------------------------------
-    // IN-CHASSIS NOTES & SHORTCUTS
-    // ------------------------------------------------------------------------
-    private var inChassisUserNotes: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("USER NOTES")
-                    .font(.system(size: 9.5, weight: .heavy, design: .monospaced))
-                    .foregroundColor(engine.currentTheme.headerText)
-                    .tracking(1.0)
-
-                Spacer()
-
-                HStack(spacing: 4) {
-                    inChassisTabBtn(title: "CUES", tab: "NOTES")
-                    inChassisTabBtn(title: "PALETTE", tab: "CUSTOMIZE")
-                    inChassisTabBtn(title: "FX SHOWS", tab: "FX")
-                    inChassisTabBtn(title: "TERMINAL", tab: "TERMINAL")
-                }
-            }
-
-            if engine.inChassisTab == "NOTES" {
-                TextField("Click to enter show notes, cue reminders, or stage cues...", text: $engine.userNotesText)
-                    .font(.system(size: 8.5, design: .monospaced))
-                    .textFieldStyle(.plain)
-                    .padding(6)
-                    .background(Color.black.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.12), lineWidth: 1))
-            } else if engine.inChassisTab == "CUSTOMIZE" {
-                HStack(spacing: 6) {
-                    Text("LED COLOR:")
-                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.65))
-
-                    Picker("LED Palette", selection: $engine.ledPalette) {
-                        ForEach(LEDPaletteMode.allCases) { pal in Text(pal.rawValue).tag(pal) }
-                    }
-                    .pickerStyle(.menu)
-                    .font(.system(size: 8, design: .monospaced))
-                }
-                .padding(4)
-                .background(Color.black.opacity(0.4))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            } else if engine.inChassisTab == "FX" {
-                VStack(spacing: 4) {
-                    HStack(spacing: 6) {
-                        Image(systemName: engine.currentFXMode.icon)
-                            .font(.system(size: 11))
-                            .foregroundColor(engine.currentTheme.accentPrimary)
-
-                        Picker("Light Show", selection: Binding(
-                            get: { engine.currentFXMode },
-                            set: { mode in engine.applyFXMode(mode) }
-                        )) {
-                            ForEach(LEDFXMode.allCases) { mode in
-                                Text(mode.rawValue).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-
-                        Spacer()
-
-                        Button(action: {
-                            engine.applyFXMode(.staticFX)
-                        }) {
-                            Text("STOP FX")
-                                .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.red.opacity(0.35))
-                                .foregroundColor(Color(red: 1.0, green: 0.45, blue: 0.45))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.red.opacity(0.6), lineWidth: 1))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    HStack(spacing: 6) {
-                        Text("SPEED:")
-                            .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                            .foregroundColor(Color(white: 0.65))
-
-                        Slider(
-                            value: $engine.fxSpeed,
-                            in: 0.4...2.5,
-                            step: 0.1
-                        )
-                        .accentColor(engine.currentTheme.accentPrimary)
-
-                        Text(String(format: "%.1fx", engine.fxSpeed))
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundColor(engine.currentTheme.accentPrimary)
-                            .frame(width: 32)
-                    }
-                }
-                .padding(4)
-                .background(Color.black.opacity(0.4))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            } else if engine.inChassisTab == "TERMINAL" {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 1) {
-                        ForEach(engine.midiLogs.prefix(6), id: \.self) { log in
-                            Text(log)
-                                .font(.system(size: 7.5, design: .monospaced))
-                                .foregroundColor(Color(red: 0.25, green: 0.92, blue: 0.72))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(height: 38)
-            }
-        }
-        .padding(8)
-        .frame(width: 408)
-        .background(Color.black.opacity(0.35))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
-    }
-
-    private func inChassisTabBtn(title: String, tab: String) -> some View {
-        Button(action: { engine.inChassisTab = tab }) {
-            Text(title)
-                .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(engine.inChassisTab == tab ? engine.currentTheme.accentPrimary : Color.white.opacity(0.08))
-                .foregroundColor(engine.inChassisTab == tab ? .black : Color.white.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-        }
-        .buttonStyle(.plain)
-    }
-
-    // ------------------------------------------------------------------------
-    // SECTION 5: 4 HORIZONTAL FADERS (CC 8–11)
+    // SECTION 5: 4 HORIZONTAL FADERS (CC 8-11)
     // ------------------------------------------------------------------------
     private var section5HorizontalFaders: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -5560,11 +11903,16 @@ struct ContentView: View {
                             .clipShape(Capsule())
                     }
 
-                    // Key color swatch preview
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(ledColor(selectedControl.currentLED))
-                        .frame(width: 16, height: 16)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.4), lineWidth: 1))
+                    // Key color swatch preview & formatted label
+                    HStack(spacing: 4) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(ledColor(selectedControl.currentLED))
+                            .frame(width: 14, height: 14)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.4), lineWidth: 1))
+                        Text(BitchBoyHardwareColor.formattedLabel(for: selectedControl.currentLED))
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .foregroundColor(ledColor(selectedControl.currentLED))
+                    }
                 }
 
                 // Custom Name Editor
@@ -5598,13 +11946,16 @@ struct ContentView: View {
                     // Idle Velocity Slider (Batch updates all selected!)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
-                            Text(engine.selectedIndices.count > 1 ? "IDLE LED VELOCITY (BATCH):" : "IDLE LED VELOCITY:")
+                            Text(engine.selectedIndices.count > 1 ? "IDLE LED (BATCH):" : "IDLE LED:")
                                 .font(.system(size: 7.5, weight: .bold, design: .monospaced))
                                 .foregroundColor(Color(white: 0.7))
                             Spacer()
-                            Text(String(format: "%03d", engine.controls[engine.selectedIndex].idleVelocity))
-                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
-                                .foregroundColor(engine.currentTheme.accentPrimary)
+                            Circle()
+                                .fill(ledColor(engine.controls[engine.selectedIndex].idleVelocity))
+                                .frame(width: 7, height: 7)
+                            Text(BitchBoyHardwareColor.formattedLabel(for: engine.controls[engine.selectedIndex].idleVelocity))
+                                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                                .foregroundColor(ledColor(engine.controls[engine.selectedIndex].idleVelocity))
                         }
                         Slider(
                             value: Binding(
@@ -5629,13 +11980,16 @@ struct ContentView: View {
                     // Pressed Velocity Slider (Batch updates all selected!)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
-                            Text(engine.selectedIndices.count > 1 ? "PRESSED LED VELOCITY (BATCH):" : "PRESSED LED VELOCITY:")
+                            Text(engine.selectedIndices.count > 1 ? "PRESSED LED (BATCH):" : "PRESSED LED:")
                                 .font(.system(size: 7.5, weight: .bold, design: .monospaced))
                                 .foregroundColor(Color(white: 0.7))
                             Spacer()
-                            Text(String(format: "%03d", engine.controls[engine.selectedIndex].activeVelocity))
-                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
-                                .foregroundColor(Color(red: 0.96, green: 0.78, blue: 0.35))
+                            Circle()
+                                .fill(ledColor(engine.controls[engine.selectedIndex].activeVelocity))
+                                .frame(width: 7, height: 7)
+                            Text(BitchBoyHardwareColor.formattedLabel(for: engine.controls[engine.selectedIndex].activeVelocity))
+                                .font(.system(size: 7.5, weight: .heavy, design: .monospaced))
+                                .foregroundColor(ledColor(engine.controls[engine.selectedIndex].activeVelocity))
                         }
                         Slider(
                             value: Binding(
@@ -5654,6 +12008,35 @@ struct ContentView: View {
                         )
                         .accentColor(Color(red: 0.85, green: 0.35, blue: 0.30))
                     }
+
+                    // 13 Authentic Hardware Color Quick Pick Bar
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("QUICK COLOR PALETTE:")
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.55))
+                        HStack(spacing: 3) {
+                            let quickColors: [UInt8] = [0, 3, 33, 41, 61, 67, 72, 74, 78, 83, 87, 95, 96]
+                            ForEach(quickColors, id: \.self) { vel in
+                                Circle()
+                                    .fill(ledColor(vel))
+                                    .frame(width: 12, height: 12)
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.white, lineWidth: engine.controls[engine.selectedIndex].activeVelocity == vel ? 1.5 : 0)
+                                    )
+                                    .shadow(color: engine.controls[engine.selectedIndex].activeVelocity == vel ? ledColor(vel) : .clear, radius: 2)
+                                    .onTapGesture {
+                                        let targets = engine.selectedIndices.count > 1 ? engine.selectedIndices : [engine.selectedIndex]
+                                        for idx in targets where engine.controls[idx].hasLED {
+                                            engine.controls[idx].activeVelocity = vel
+                                        }
+                                        engine.saveCurrentSlot()
+                                        SoundEffect.knobTick.play(with: engine.soundPack)
+                                    }
+                            }
+                        }
+                    }
+                    .padding(.top, 1)
 
                     // Large Fill Buttons
                     HStack(spacing: 4) {
@@ -5781,9 +12164,18 @@ struct BitchBoyNativeApp: App {
     var body: some Scene {
         WindowGroup("BitchManager") {
             ContentView(engine: engine)
-                .frame(minWidth: 1538 * 0.15, minHeight: 760 * 0.15)
+                .frame(minWidth: 1538 * 0.25, minHeight: 760 * 0.15)
         }
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About BitchManager...") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(nil)
+                }
+                Button("Check for Updates on GitHub...") {
+                    engine.checkForUpdates(showModalIfCurrent: true)
+                }
+                Divider()
+            }
             CommandMenu("UI Zoom & Window") {
                 Button(engine.isWindowAlwaysOnTop ? "✓ Keep Window Always On Top" : "Keep Window Always On Top") {
                     engine.toggleWindowAlwaysOnTop()
@@ -5811,6 +12203,12 @@ struct BitchBoyNativeApp: App {
         MenuBarExtra {
             Text(engine.isConnected ? "ONLINE: \(engine.deviceName)" : "OFFLINE // UNPLUGGED")
             Divider()
+            if engine.updateAvailable, let rel = engine.latestRelease {
+                Button("★ Update Available (\(rel.tagName))...") {
+                    engine.showUpdateModal = true
+                }
+                Divider()
+            }
             Button(engine.isWindowAlwaysOnTop ? "📌 Unpin Always On Top" : "📌 Pin Window Always On Top") {
                 engine.toggleWindowAlwaysOnTop()
             }
@@ -5821,6 +12219,9 @@ struct BitchBoyNativeApp: App {
                 Button("Load \(engine.slots[idx].name)") { engine.selectSlot(idx) }
             }
             Divider()
+            Button("Check for Updates on GitHub...") {
+                engine.checkForUpdates(showModalIfCurrent: true)
+            }
             Button("Quit BitchManager") { NSApplication.shared.terminate(nil) }
         } label: {
             Image("BitchBoyMenuBarIcon")
@@ -5837,3 +12238,4 @@ struct BitchBoyNativeApp: App {
     ContentView(engine: BitchBoyEngine())
         .frame(width: 1538, height: 760)
 }
+
