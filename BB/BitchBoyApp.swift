@@ -1673,10 +1673,11 @@ final class BitchBoyEngine: ObservableObject {
     private var activeDownloadTask: URLSessionDownloadTask?
 
     var currentAppVersion: String {
-        if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
-            return v
+        let bundleVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        if !bundleVer.isEmpty && bundleVer != "1.0" && bundleVer != "1.0.0" {
+            return bundleVer
         }
-        return "1.0.0"
+        return "1.1.0"
     }
 
     private let storageKey = "BitchBoy_SavedSlots_v5"
