@@ -1,0 +1,110 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows .exe (x64 Installer & Portable)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies & Windows native modules
+        run: |
+          npm install
+          npm install --no-save @rollup/rollup-win32-x64-msvc lightningcss-win32-x64-msvc @tailwindcss/oxide-win32-x64-msvc @esbuild/win32-x64
+
+      - name: Build Web Application (Vite)
+        run: npm run build
+
+      - name: Install Electron & Packager
+        run: npm install --no-save electron@33.2.1 electron-builder@25.1.8
+
+      - name: Ensure Electron Main Script Exists
+        shell: pwsh
+        run: |
+          if (!(Test-Path "electron")) { New-Item -ItemType Directory -Force -Path "electron" }
+          if (!(Test-Path "electron/main.cjs")) {
+            @'
+          const { app, BrowserWindow, Menu } = require('electron');
+          const path = require('path');
+
+          function createWindow() {
+            const win = new BrowserWindow({
+              width: 1600,
+              height: 860,
+              minWidth: 1024,
+              minHeight: 680,
+              title: 'BitchManager — Video Controller & LED Programming Studio',
+              backgroundColor: '#040807',
+              autoHideMenuBar: true,
+              show: false,
+              webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+                sandbox: true,
+              },
+            });
+
+            Menu.setApplicationMenu(null);
+            win.loadFile(path.join(__dirname, '../dist/index.html'));
+
+            win.once('ready-to-show', () => {
+              win.show();
+            });
+          }
+
+          app.whenReady().then(() => {
+            createWindow();
+
+            app.on('activate', () => {
+              if (BrowserWindow.getAllWindows().length === 0) {
+                createWindow();
+              }
+            });
+          });
+
+          app.on('window-all-closed', () => {
+            if (process.platform !== 'darwin') {
+              app.quit();
+            }
+          });
+          '@ | Out-File -FilePath "electron/main.cjs" -Encoding utf8
+          }
+
+      - name: Package Windows .exe
+        run: npx electron-builder --win --x64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List Generated Executables
+        shell: bash
+        run: |
+          echo "Generated Windows binaries in dist_electron:"
+          ls -la dist_electron/*.exe || true
+
+      - name: Upload Windows Executables to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BitchManager-Windows-x64
+          path: dist_electron/*.exe
+          retention-days: 30
