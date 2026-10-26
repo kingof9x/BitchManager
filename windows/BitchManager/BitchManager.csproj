@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BitchManager</RootNamespace>
+    <AssemblyName>BitchManager</AssemblyName>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.1.0</Version>
+    <Product>BitchManager</Product>
+    <Description>BitchBoy V1 hardware companion, lighting studio and MIDI/OSC/Macro router for Windows</Description>
+  </PropertyGroup>
+
+  <!-- The UI is built in C# (no XAML), so a plain WPF framework reference is all that is needed.
+       This also lets the project compile on non-Windows machines for CI type-checking. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
+    <PackageReference Include="NAudio.Midi" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\mascot.png" />
+    <Resource Include="Assets\logo.png" />
+    <Resource Include="Assets\badge.png" />
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+
+</Project>
