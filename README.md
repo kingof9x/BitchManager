@@ -98,3 +98,15 @@ xcodebuild -scheme BB -configuration Release build
 Have questions, suggestions, or want to share your custom profiles?
 - **Discord**: `@Kooklys`
 - **GitHub Issues**: [Open an issue or feature request](https://github.com/kookly/BitchManager/issues)
+
+## Project status
+
+**Status:** Waiting on others  
+**Waiting on:** Upstream development to settle down  
+**Notes:** Proof of concept demonstrated (native Windows port).  
+**Last updated:** 2026-10-28
+
+### Task list
+
+- [ ] Port the changes once upstream development settles (blocked)
+
