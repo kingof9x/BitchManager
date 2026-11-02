@@ -104,7 +104,7 @@ Have questions, suggestions, or want to share your custom profiles?
 **Status:** Waiting on others  
 **Waiting on:** Upstream development to settle down  
 **Notes:** Proof of concept demonstrated (native Windows port).  
-**Last updated:** 2026-10-28
+**Last updated:** 2026-11-02
 
 ### Task list
 
